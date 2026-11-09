@@ -61,23 +61,36 @@ Extensão prevista: uma ação de "comprimir" (quantizar para 4 bits) em vez de 
 
 Rodar o LLM a cada decisão de treino seria lento demais. Por isso usamos um **ambiente proxy**:
 
-1. O GPT-2 lê cada texto **uma única vez**, com o cache completo, e a atenção é gravada num *trace*: para cada cabeça de atenção (12 camadas × 12 cabeças), quanto os tokens de cada bloco consultam cada bloco anterior. O trace guarda também as médias por camada e do modelo todo.
+1. O LLM lê cada texto **uma única vez**, com o cache completo, e a atenção é gravada num *trace*: para cada cabeça de K/V, quanto os tokens de cada bloco consultam cada bloco anterior. O trace guarda também as médias por camada e do modelo todo.
 2. O ambiente (`KVCacheEnv`, Gymnasium) simula os despejos a partir do trace: a cada bloco novo, o agente escolhe quem sai e perde a atenção que os próximos tokens dariam aos blocos já apagados.
 3. Cada texto tem uma **agulha** ("the secret code is NNNN") inserida em posição aleatória no primeiro quarto do texto, fora do bloco inicial, e uma pergunta sobre ela no final.
 
 Como o agente só decide nas fronteiras de bloco, o trace guarda a atenção **média dos tokens de cada bloco**, e não token a token: a perda e todas as features saem exatamente iguais (há um teste que confere isso contra uma simulação token a token) e o arquivo fica 16 vezes menor.
 
-Os textos vêm da WikiText-2, com 1.024 tokens cada (64 blocos de 16, orçamento de 16 blocos por cache): 200 textos de treino e 50 de teste, sem sobreposição. Há também uma fonte **sintética** que imita esses padrões, com 144 cabeças de papéis diferentes (locais, de sink, de blocos importantes, de revisita e poucas "de recuperação" que buscam a agulha), e roda sem GPU nem internet.
+Os textos vêm da WikiText-2, com 1.024 tokens cada (64 blocos de 16, orçamento de 16 blocos por cache): 200 textos de treino e 50 de teste, sem sobreposição. Há também uma fonte **sintética** que imita esses padrões, com cabeças de papéis diferentes (locais, de sink, de blocos importantes, de revisita e poucas "de recuperação" que buscam a agulha), e roda sem GPU nem internet.
+
+Antes de gravar a atenção de um texto, o script pergunta a senha ao modelo **com o cache completo** e anota se ele acerta. Essa taxa diz se a tarefa faz sentido para aquele modelo; com `--exigir-acerto`, só os textos em que ele acerta viram trace.
+
+### Dois modelos: GPT-2 e Qwen2.5-0.5B
+
+O cache guarda um K e um V por **cabeça de K/V**, e é essa a unidade que pode ser despejada:
+
+| Modelo | Camadas | Consultas (Q) | Cabeças de K/V | Caches | Atenção |
+|---|---|---|---|---|---|
+| GPT-2 small (`--fonte gpt2`) | 12 | 12 | 12 | 12 × 12 = **144** | MHA: cada consulta tem o seu K/V |
+| Qwen2.5-0.5B (`--fonte qwen`) | 24 | 14 | 2 | 24 × 2 = **48** | GQA: 7 consultas compartilham cada K/V |
+
+O Qwen2.5-0.5B é um modelo atual e usa **GQA** (*grouped-query attention*), hoje o padrão (Llama 3, Mistral, Qwen): várias cabeças de consulta compartilham o mesmo K/V, justamente para o cache caber na memória. Como um token só sai do cache para o grupo inteiro, a atenção das 7 consultas de um grupo é mediada ao gravar o trace — é o que aquele cache serve, em média. O script lê camadas e cabeças da configuração do modelo e imprime, então trocar de modelo não exige mexer no código.
 
 ### Três modos: geral, por camada e por cabeça
 
-Cada camada e cada cabeça do GPT-2 presta atenção em coisas diferentes, e no GPT-2 cada cabeça tem o seu próprio K e V, ou seja, o seu próprio pedaço do cache. Testamos três granularidades, sempre com **o mesmo orçamento (16 blocos) em cada cache**:
+Cada camada e cada cabeça presta atenção em coisas diferentes. Os modos não mudam **onde** o cache fica (sempre nas cabeças de K/V), e sim **com que granularidade a política decide**: no modo geral, uma decisão é aplicada a todas as cabeças de K/V; por camada, a decisão de uma camada vale para as cabeças de K/V dela. Os modos mais grossos são os mais fáceis de implementar de verdade — se todas as cabeças apagam os mesmos tokens, o tensor do cache continua retangular, que é como o vLLM gerencia memória — e a escada entre eles mede quanto vale a liberdade extra. Sempre com **o mesmo orçamento (16 blocos) em cada cache**:
 
-| Modo | Caches | O agente vê, por candidato | Episódio | Entradas da rede |
+| Modo | Caches | O agente vê, por candidato | Episódio | Entradas da rede (GPT-2 / Qwen) |
 |---|---|---|---|---|
-| `geral` | 1, igual para o modelo todo | idade, sink, posição, atenção acumulada e recente **na média do modelo** | um texto | 86 |
-| `por_camada` | 12, um por camada | o mesmo, com a atenção **daquela camada** + qual camada é | um texto em uma camada | 98 |
-| `por_cabeca` | 144, um por cabeça | o mesmo, com a atenção **daquela cabeça** + qual cabeça é | um texto em uma cabeça | 230 |
+| `geral` | 1, igual para o modelo todo | idade, sink, posição, atenção acumulada e recente **na média do modelo** | um texto | 86 / 86 |
+| `por_camada` | um por camada (12 / 24) | o mesmo, com a atenção **daquela camada** + qual camada é | um texto em uma camada | 98 / 110 |
+| `por_cabeca` | um por cabeça de K/V (144 / 48) | o mesmo, com a atenção **daquela cabeça** + qual cabeça é | um texto em uma cabeça | 230 / 134 |
 
 Nos modos por camada e por cabeça, **o mesmo agente serve para todas as unidades** (parâmetros compartilhados) e cada unidade é um episódio separado. Os caches das unidades não interagem: se elas decidissem em sequência no mesmo episódio, o "próximo estado" de uma decisão seria o cache de outra unidade, que o agente não vê, e a propriedade de Markov se perderia. Para avaliar um texto, rodamos todas as unidades e tiramos a média. As regras fixas também passam a decidir por unidade (o H2O por cabeça é o método original).
 
@@ -90,7 +103,7 @@ Stable-Baselines3 com `MlpPolicy`: uma saída Q(s, a) para cada um dos 17 candid
 | Parâmetro | `geral` | `por_camada` | `por_cabeca` | Por quê |
 |---|---|---|---|---|
 | `n_timesteps` | 200.000 | 300.000 | 500.000 | ~4.250, ~6.400 e ~10.600 episódios de 47 decisões |
-| `policy_kwargs.net_arch` | 128×128 | 128×128 | 256×256 | por cabeça o agente aprende o papel de 144 unidades |
+| `policy_kwargs.net_arch` | 128×128 | 128×128 | 256×256 | por cabeça o agente aprende o papel de até 144 unidades |
 | `learning_starts` | 5.000 | 5.000 | 5.000 | episódios curtos; não precisa de 100 mil passos aleatórios |
 | `exploration_fraction` | 0,3 | 0,3 | 0,3 | ε de 1,0 a 0,05; explorar mais para achar o prêmio da agulha |
 | `buffer_size` | 100k | 100k | 200k | |
@@ -103,24 +116,27 @@ A política gulosa (sem exploração) é avaliada nos 50 textos de teste, em tod
 Requer Python 3.10+ (no Debian/Ubuntu: `sudo apt install python3-venv`).
 
 ```bash
-make setup-gpt2      # cria .venv e instala tudo (PyTorch, SB3, transformers)
-make teste           # testes do ambiente
-make tudo-modos      # traces do GPT-2 -> os três modos (baselines, DQN, gráficos) -> comparação
+make setup-llm              # cria .venv e instala tudo (PyTorch, SB3, transformers)
+make teste                  # testes do ambiente e da gravação da atenção
+make tudo-modos             # traces do GPT-2 -> os três modos (baselines, DQN, gráficos) -> comparação
+make tudo-modos FONTE=qwen  # o mesmo com o Qwen2.5-0.5B, em dados/qwen e resultados/qwen
 ```
 
 Um modo só: `make tudo MODO=por_cabeca` (ou `make baselines treinar graficos MODO=por_camada` sem regerar os traces). Sem GPU ou sem internet: `make setup && make tudo-modos FONTE=sintetico`.
 
-Etapa por etapa:
+Etapa por etapa (troque `qwen` por `gpt2` para o outro modelo):
 
 ```bash
-.venv/bin/python scripts/gerar_traces_gpt2.py                              # dados/gpt2/{treino,teste}
-.venv/bin/python scripts/avaliar_baselines.py --fonte gpt2 --modo por_cabeca
-.venv/bin/python scripts/treinar_dqn.py --fonte gpt2 --modo por_cabeca      # resultados/gpt2/por_cabeca/dqn/seed{0,1,2}
-.venv/bin/python scripts/graficos.py --fonte gpt2 --modo por_cabeca         # resultados/gpt2/por_cabeca/figuras
-.venv/bin/python scripts/comparar_modos.py --fonte gpt2                     # depois de rodar os três modos
+.venv/bin/python scripts/gerar_traces_llm.py --fonte qwen                   # dados/qwen/{treino,teste}
+.venv/bin/python scripts/avaliar_baselines.py --fonte qwen --modo por_cabeca
+.venv/bin/python scripts/treinar_dqn.py --fonte qwen --modo por_cabeca      # resultados/qwen/por_cabeca/dqn/seed{0,1,2}
+.venv/bin/python scripts/graficos.py --fonte qwen --modo por_cabeca         # resultados/qwen/por_cabeca/figuras
+.venv/bin/python scripts/comparar_modos.py --fonte qwen                     # depois de rodar os três modos
 ```
 
-Tempo aproximado num notebook (CPU): traces do GPT-2 de 2 a 10 min; DQN por semente cerca de 2,5 min no `geral`, 4 min no `por_camada` e 12 min no `por_cabeca`. O `make tudo-modos` inteiro leva cerca de 1 hora.
+Contextos mais longos: `--tokens 2048` ou `--tokens 4096` (o Qwen aceita até 32 mil). O custo da gravação cresce com o quadrado do número de tokens, e numa GPU de 6 GB o 4.096 ainda cabe. Para o episódio continuar do mesmo tamanho, aumente o bloco junto: `--tokens 4096 --bloco 64` mantém os 64 blocos e o orçamento de 16.
+
+Tempo aproximado num notebook: traces de 2 a 10 min (GPU) ou 10 a 30 min (CPU); DQN por semente cerca de 2,5 min no `geral`, 4 min no `por_camada` e 12 min no `por_cabeca` com 144 caches (menos no Qwen, que tem 48). O `make tudo-modos` inteiro leva cerca de 1 hora.
 
 ### Saídas
 
@@ -140,7 +156,7 @@ configs/dqn.yml                  hiperparâmetros do DQN, um bloco por modo
 src/kvcache_rl/
   env.py                         ambiente Gymnasium (KVCacheEnv) com os três modos
   traces.py                      formato dos traces (por bloco; modelo, camada e cabeça) e gerador sintético
-  gpt2.py                        gravação da atenção do GPT-2 por cabeça e inserção da agulha
+  llm.py                         gravação da atenção por cabeça de K/V (GPT-2, Qwen) e inserção da agulha
   baselines.py                   janela deslizante, StreamingLLM, H2O, aleatória, oráculo e avaliação
   config.py, visual.py           leitura do dqn.yml e estilo dos gráficos
 scripts/                         gerar traces, avaliar, treinar, gráficos, comparar modos
@@ -161,6 +177,8 @@ tests/                           testes do ambiente
 - Wu et al. *Retrieval Head Mechanistically Explains Long-Context Factuality*. 2024. [arXiv:2404.15574](https://arxiv.org/abs/2404.15574)
 - Xiao et al. *DuoAttention: Efficient Long-Context LLM Inference with Retrieval and Streaming Heads*. 2024. [arXiv:2410.10819](https://arxiv.org/abs/2410.10819)
 - Fu et al. *Not All Heads Matter: A Head-Level KV Cache Compression Method with Integrated Retrieval and Reasoning* (HeadKV). 2024. [arXiv:2410.19258](https://arxiv.org/abs/2410.19258)
+- Ainslie et al. *GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints*. EMNLP 2023. [arXiv:2305.13245](https://arxiv.org/abs/2305.13245)
+- Qwen Team. *Qwen2.5 Technical Report*. 2024. [arXiv:2412.15115](https://arxiv.org/abs/2412.15115)
 - Mnih et al. *Human-level control through deep reinforcement learning* (DQN). Nature, 2015.
 - Merity et al. *Pointer Sentinel Mixture Models* (WikiText). 2016. [arXiv:1609.07843](https://arxiv.org/abs/1609.07843)
 - Sutton & Barto. *Reinforcement Learning: An Introduction*, 2ª ed., 2018.

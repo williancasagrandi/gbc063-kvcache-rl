@@ -15,7 +15,7 @@ TEMAS = {
     "claro": dict(fundo="#FFFFFF", texto="#0B0B0B", secundario="#52514E", grade="#E9E8E4",
                   eixo="#8A8880", barra="#B4B2AA", destaque="#2A78D6", referencia="#52514E"),
 }
-FONTES = {"gpt2": "GPT-2", "sintetico": "sintéticos"}
+FONTES = {"gpt2": "GPT-2", "qwen": "Qwen2.5-0.5B", "sintetico": "sintéticos"}
 
 
 def num(v: float, casas: int = 1) -> str:

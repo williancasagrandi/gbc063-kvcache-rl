@@ -101,7 +101,7 @@ def test_unidades(traces):
     assert (camada.U, cabeca.U) == (6, 24)
     obs, info = cabeca.reset(options={"trace": 2, "unidade": 13})
     assert info["unidade"] == 13 and obs[-24:].argmax() == 13 and obs[-24:].sum() == 1
-    assert cabeca.nome_unidade(13) == "camada 3, cabeça 1"
+    assert cabeca.nome_unidade(13) == "camada 3, cabeça de K/V 1"
     assert len(cabeca.episodios_avaliacao()) == len(traces) * 24
 
 
@@ -135,16 +135,12 @@ def test_oraculo_e_limite_superior(traces, modo):
     assert avaliar(env, BASELINES["oraculo"])["agulha"] == pytest.approx(1.0)
 
 
-def test_agulha_gpt2_fora_do_sink_e_no_bloco_certo():
-    from kvcache_rl.gpt2 import montar_sequencia
-
+def test_unidades_no_formato_do_qwen():
+    """O ambiente não assume 12 x 12: com GQA (Qwen2.5-0.5B) são 24 camadas x 2 cabeças de K/V."""
     rng = np.random.default_rng(0)
-    corpo = list(range(1000, 3000))
-    prefixo, codigo, ponto, pergunta = [1, 2, 3], [7, 7], [4], [5, 6, 8]
-    for _ in range(200):
-        s = montar_sequencia(corpo, prefixo, codigo, ponto, pergunta, 1024, 16, rng)
-        assert len(s.ids) == 1024
-        assert 2 <= s.bloco_agulha < 1024 // 16 // 4 + 1
-        i = s.ids.index(7)  # primeiro token do código
-        assert s.ids[i + 1] == 7 and (i + 1) // 16 == s.bloco_agulha
-        assert s.ids[-3:] == pergunta
+    tr = [gerar_sintetico(24, 16, rng=rng, n_camadas=24, n_cabecas=2, nome="qwen")]
+    assert KVCacheEnv(tr, orcamento=8, modo="geral").U == 1
+    assert KVCacheEnv(tr, orcamento=8, modo="por_camada").U == 24
+    env = KVCacheEnv(tr, orcamento=8, modo="por_cabeca")
+    assert env.U == 48 and env.forma == (24, 2)
+    assert env.nome_unidade(3) == "camada 1, cabeça de K/V 1"

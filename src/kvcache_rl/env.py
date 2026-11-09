@@ -15,7 +15,8 @@ Três modos, sempre com o mesmo orçamento (16 blocos) em cada cache:
               todas as camadas e cabeças. Episódio = um texto.
   por_camada  um cache por camada. Episódio = um texto visto por UMA camada,
               com a atenção daquela camada; o estado diz qual camada é.
-  por_cabeca  um cache por cabeça de atenção (no GPT-2, 12 x 12 = 144).
+  por_cabeca  um cache por cabeça de K/V, que é a unidade que o cache guarda de
+              fato (GPT-2: 12 x 12 = 144; Qwen2.5-0.5B, com GQA: 24 x 2 = 48).
               Episódio = um texto visto por UMA cabeça; o estado diz qual é.
 
 Nos modos por camada e por cabeça, o mesmo agente serve para todas as unidades
@@ -132,7 +133,7 @@ class KVCacheEnv(gym.Env):
             return "modelo"
         if self.modo == "por_camada":
             return f"camada {u}"
-        return f"camada {u // self.forma[1]}, cabeça {u % self.forma[1]}"
+        return f"camada {u // self.forma[1]}, cabeça de K/V {u % self.forma[1]}"
 
     @property
     def decisoes_por_texto(self) -> int:

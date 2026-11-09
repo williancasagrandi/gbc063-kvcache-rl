@@ -8,6 +8,10 @@
 #   learning_starts 5k    100k seria uma fração grande do treino
 #   exploration_fraction  explorar mais para descobrir o prêmio da agulha
 #   eval_freq             a cada quantos passos avaliar no teste (não é do SB3)
+#
+# Os números dos comentários são do GPT-2 (12 camadas x 12 cabeças = 144 caches).
+# No Qwen2.5-0.5B, com GQA, são 24 camadas x 2 cabeças de K/V = 48 caches: as mesmas
+# entradas servem e o por_cabeca converge com menos passos (--passos 3e5 basta).
 
 # Geral: um cache para o modelo todo, atenção média. 86 entradas.
 # 200k passos ≈ 4.250 episódios (textos).

@@ -8,7 +8,7 @@ CHAVES = {"geral": "KVCache-v0", "por_camada": "KVCachePorCamada-v0", "por_cabec
 NOMES_MODOS = {
     "geral": "Geral (média do modelo)",
     "por_camada": "Decisão por camada",
-    "por_cabeca": "Decisão por cabeça",
+    "por_cabeca": "Decisão por cabeça de K/V",
 }
 
 
