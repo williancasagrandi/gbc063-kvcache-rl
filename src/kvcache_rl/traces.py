@@ -17,6 +17,10 @@ Formato (.npz), com nb = número de blocos:
     bloco   -> int, tokens por bloco
     agulha  -> int, bloco com a "agulha" (-1 se não houver)
     nome    -> str
+Só nos traces de LLM real (para reavaliar as políticas no próprio modelo):
+    ids      -> int32 (T,): os tokens do texto, na ordem
+    resposta -> int32: os tokens da senha, que o modelo deveria gerar no final
+    modelo   -> str: nome do modelo no Hugging Face
 """
 
 from __future__ import annotations
@@ -35,6 +39,9 @@ class Trace:
     nome: str = ""
     camadas: np.ndarray | None = None  # (L, nb, nb), float16
     cabecas: np.ndarray | None = None  # (L, H, nb, nb), float16
+    ids: np.ndarray | None = None  # (T,), int32
+    resposta: np.ndarray | None = None  # tokens da senha, int32
+    modelo: str = ""
 
     @property
     def n_blocos(self) -> int:
@@ -52,6 +59,12 @@ class Trace:
             extra["camadas"] = self.camadas.astype(np.float16)
         if self.cabecas is not None:
             extra["cabecas"] = self.cabecas.astype(np.float16)
+        if self.ids is not None:
+            extra["ids"] = np.asarray(self.ids, dtype=np.int32)
+        if self.resposta is not None:
+            extra["resposta"] = np.asarray(self.resposta, dtype=np.int32)
+        if self.modelo:
+            extra["modelo"] = np.str_(self.modelo)
         np.savez_compressed(
             caminho,
             att=self.att.astype(np.float32),
@@ -74,6 +87,9 @@ class Trace:
             nome=str(d["nome"]),
             camadas=d["camadas"] if "camadas" in d.files else None,
             cabecas=d["cabecas"] if "cabecas" in d.files else None,
+            ids=d["ids"] if "ids" in d.files else None,
+            resposta=d["resposta"] if "resposta" in d.files else None,
+            modelo=str(d["modelo"]) if "modelo" in d.files else "",
         )
 
 

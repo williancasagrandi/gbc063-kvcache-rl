@@ -6,7 +6,7 @@
 #   sem AtariWrapper      o histórico já está no estado (atenção acumulada)
 #   n_timesteps           um episódio tem só 47 decisões
 #   learning_starts 5k    100k seria uma fração grande do treino
-#   exploration_fraction  explorar mais para descobrir o prêmio da agulha
+#   exploration_fraction  30% do treino explorando (ε de 1,0 a 0,05)
 #   eval_freq             a cada quantos passos avaliar no teste (não é do SB3)
 #
 # Os números dos comentários são do GPT-2 (12 camadas x 12 cabeças = 144 caches).
@@ -35,7 +35,7 @@ KVCache-v0:
   env_kwargs:
     modo: geral
     orcamento: 16
-    bonus_agulha: 10.0
+    bonus_agulha: 0.0   # recompensa = só atenção perdida; a agulha é medida no LLM real
 
 # Por camada: um cache por camada (12). Episódio = um texto visto por uma camada;
 # o mesmo agente serve para todas e recebe qual camada é. 98 entradas.
@@ -60,7 +60,7 @@ KVCachePorCamada-v0:
   env_kwargs:
     modo: por_camada
     orcamento: 16
-    bonus_agulha: 10.0
+    bonus_agulha: 0.0   # recompensa = só atenção perdida; a agulha é medida no LLM real
 
 # Por cabeça: um cache por cabeça de atenção (12 camadas × 12 cabeças = 144).
 # Episódio = um texto visto por uma cabeça; o estado diz qual é. 230 entradas.
@@ -87,4 +87,4 @@ KVCachePorCabeca-v0:
   env_kwargs:
     modo: por_cabeca
     orcamento: 16
-    bonus_agulha: 10.0
+    bonus_agulha: 0.0   # recompensa = só atenção perdida; a agulha é medida no LLM real

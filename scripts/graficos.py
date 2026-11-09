@@ -100,7 +100,7 @@ def comparacao_final(baselines, finais, t, saida: Path, modo: str):
 
     paineis = [
         (eixos[0], 1, "Atenção perdida por token (%) — menor é melhor", 1),
-        (eixos[1], 4, "Agulha mantida até o fim (%) — maior é melhor", 0),
+        (eixos[1], 4, "Agulha no cache, proxy (%) — maior é melhor", 0),
     ]
     for ax, col, titulo, casas in paineis:
         estilo(ax, t)
@@ -134,6 +134,7 @@ def comparacao_final(baselines, finais, t, saida: Path, modo: str):
     nota = f"{NOMES_MODOS[modo]} · DQN: média de {len(finais)} sementes, traço = mín–máx · Oráculo (tracejado): limite superior"
     if modo != "geral":
         nota += " · agulha ponderada pela atenção que cada unidade dá a ela"
+    nota += " · métricas no LLM real: avaliar_no_modelo.py"
     fig.text(0.16, 0.03, nota, color=t["secundario"], fontsize=10.5)
     fig.subplots_adjust(left=0.16, right=0.97, top=0.88, bottom=0.12, wspace=0.12)
     fig.savefig(saida, facecolor=t["fundo"])

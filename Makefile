@@ -4,7 +4,12 @@
 #   make tudo-modos                 os três modos + gráfico comparando (~1 h)
 #   make tudo-modos FONTE=qwen      o mesmo com o Qwen2.5-0.5B (GQA: 48 caches)
 #   make tudo FONTE=sintetico       sem GPU e sem internet
+#   make real MODO=geral            só a avaliação no LLM real (precisa dos traces e do DQN)
 # Variáveis: FONTE (gpt2|qwen|sintetico), MODO, TOKENS (tamanho dos textos), PY
+#
+# Com FONTE gpt2 ou qwen, as políticas também são avaliadas no próprio LLM com o cache
+# podado (perplexidade e senha): são essas as métricas finais. Os traces sintéticos não
+# têm um modelo por trás, então para eles só existem as métricas do proxy.
 FONTE ?= gpt2
 MODO ?= geral
 MODOS = geral por_camada por_cabeca
@@ -12,7 +17,7 @@ TOKENS ?=
 PY ?= .venv/bin/python
 ARGS_TRACES = $(if $(TOKENS),--tokens $(TOKENS),)
 
-.PHONY: setup setup-llm setup-gpt2 teste traces baselines treinar graficos tudo modos comparar tudo-modos limpar
+.PHONY: setup setup-llm setup-gpt2 teste traces baselines treinar graficos real tudo modos comparar tudo-modos limpar
 
 setup:
 	python3 -m venv .venv
@@ -45,19 +50,30 @@ treinar:
 graficos:
 	$(PY) scripts/graficos.py --fonte $(FONTE) --modo $(MODO)
 
-tudo: traces baselines treinar graficos
+real:
+	$(PY) scripts/avaliar_no_modelo.py --fonte $(FONTE) --modo $(MODO)
 
-# os três modos sobre os mesmos traces, depois o gráfico comparando
+ifeq ($(FONTE),sintetico)
+tudo: traces baselines treinar graficos
+else
+tudo: traces baselines treinar graficos real
+endif
+
+# os três modos sobre os mesmos traces, depois os gráficos comparando
 modos:
 	for m in $(MODOS); do \
 		$(PY) scripts/avaliar_baselines.py --fonte $(FONTE) --modo $$m && \
 		$(PY) scripts/treinar_dqn.py --fonte $(FONTE) --modo $$m && \
 		$(PY) scripts/graficos.py --fonte $(FONTE) --modo $$m || exit 1; \
+		if [ "$(FONTE)" != "sintetico" ]; then \
+			$(PY) scripts/avaliar_no_modelo.py --fonte $(FONTE) --modo $$m || exit 1; \
+		fi; \
 	done
-	$(PY) scripts/comparar_modos.py --fonte $(FONTE)
+	$(MAKE) comparar FONTE=$(FONTE)
 
 comparar:
 	$(PY) scripts/comparar_modos.py --fonte $(FONTE)
+	if [ "$(FONTE)" != "sintetico" ]; then $(PY) scripts/graficos_modelo_real.py --fonte $(FONTE); fi
 
 tudo-modos: traces modos
 

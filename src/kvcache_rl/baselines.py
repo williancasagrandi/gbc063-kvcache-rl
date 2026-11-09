@@ -30,10 +30,14 @@ def h2o(env, obs, info, n_recentes: int = 4):
 
 
 def oraculo(env, obs, info):
-    """Despeja o bloco que receberá menos atenção no futuro e nunca a agulha.
-    Não é implementável na prática (usa o futuro): é o limite superior."""
+    """Despeja o bloco que receberá menos atenção no resto do texto.
+
+    Não é implementável na prática (olha o futuro) e serve de referência. É guloso:
+    decide um passo de cada vez, então é um limite muito bom, mas não o ótimo
+    garantido. Se a recompensa tiver bônus de agulha, também nunca despeja a agulha.
+    """
     futura = env.massa_futura()
-    if env.trace.agulha >= 0:
+    if env.bonus_agulha > 0 and env.trace.agulha >= 0:
         futura = futura.copy()
         futura[info["candidatos"] == env.trace.agulha] = np.inf
     return int(np.argmin(futura))

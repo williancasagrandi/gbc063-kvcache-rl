@@ -132,7 +132,25 @@ def test_oraculo_e_limite_superior(traces, modo):
     perdas = {n: avaliar(env, BASELINES[n])["atencao_perdida"] for n in ("oraculo", "janela_deslizante", "aleatoria")}
     assert perdas["oraculo"] <= perdas["janela_deslizante"]
     assert perdas["oraculo"] <= perdas["aleatoria"]
-    assert avaliar(env, BASELINES["oraculo"])["agulha"] == pytest.approx(1.0)
+
+
+def test_recompensa_padrao_e_so_atencao_perdida(traces):
+    """Sem bônus, o retorno do episódio é exatamente menos a atenção perdida acumulada."""
+    env = KVCacheEnv(traces, orcamento=8, modo="geral")
+    assert env.bonus_agulha == 0.0
+    env.reset(options={"trace": 0})
+    G, fim = 0.0, False
+    while not fim:
+        _, r, fim, _, info = env.step(0)
+        G += r
+    assert G == pytest.approx(-env.perda_total)
+
+
+def test_oraculo_so_protege_a_agulha_com_bonus(traces):
+    com = KVCacheEnv(traces, orcamento=8, modo="geral", bonus_agulha=10.0)
+    assert avaliar(com, BASELINES["oraculo"])["agulha"] == pytest.approx(1.0)
+    sem = KVCacheEnv(traces, orcamento=8, modo="geral")
+    assert avaliar(sem, BASELINES["oraculo"])["atencao_perdida"] <= avaliar(com, BASELINES["oraculo"])["atencao_perdida"]
 
 
 def test_unidades_no_formato_do_qwen():

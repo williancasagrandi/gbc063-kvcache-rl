@@ -14,7 +14,7 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("transformers")
 
 from kvcache_rl.llm import (Sequencia, _Gravador, agrupar_kv, atencao_por_cabeca,  # noqa: E402
-                            ler_arquitetura, responde_certo)
+                            ler_arquitetura, nll_e_acertos, responde_certo)
 from kvcache_rl.traces import agregar_blocos  # noqa: E402
 
 TOKENS, BLOCO = 64, 8
@@ -100,18 +100,27 @@ def test_hook_tira_a_matriz_grande_da_saida():
     assert len(g.camadas) == 1 and g.camadas[0].shape == (3, 2, 2)
 
 
-def test_responde_certo():
+@pytest.mark.parametrize("fabrica", [qwen_de_brinquedo, gpt2_de_brinquedo])
+def test_nll_bate_com_os_logits_do_modelo(fabrica):
+    """A NLL em pedaços (base_model + cabeça de saída) é a mesma dos logits completos do HF."""
+    modelo = fabrica()
+    nll, certo = nll_e_acertos(modelo, IDS, "cpu", pedaco=10)
+    with torch.no_grad():
+        logits = modelo(torch.tensor([IDS])).logits[0, :-1].float()
+    alvo = torch.tensor(IDS[1:])
+    esperado = torch.nn.functional.cross_entropy(logits, alvo, reduction="none").double().numpy()
+    assert nll.shape == (TOKENS - 1,) and np.allclose(nll, esperado, atol=1e-5)
+    assert (certo == (logits.argmax(-1) == alvo).numpy()).all()
+
+
+def test_responde_certo_e_igual_a_gerar_gulosamente():
     modelo = qwen_de_brinquedo(n_camadas=1)
-
-    class TokFalso:  # dublê: não precisamos de um tokenizador baixado para testar a comparação
-        eos_token_id = 0
-
-        def decode(self, ids, skip_special_tokens=True):
-            return " 1234"
-
-    ok, resposta = responde_certo(modelo, TokFalso(), Sequencia(ids=IDS, bloco_agulha=2, codigo="1234"), "cpu", 2)
-    assert ok and resposta == "1234"
-    assert not responde_certo(modelo, TokFalso(), Sequencia(ids=IDS, bloco_agulha=2, codigo="9999"), "cpu", 2)[0]
+    with torch.no_grad():
+        gerado = modelo.generate(torch.tensor([IDS]), attention_mask=torch.ones(1, TOKENS, dtype=torch.long),
+                                 max_new_tokens=3, do_sample=False, pad_token_id=0)[0, TOKENS:].tolist()
+    assert responde_certo(modelo, Sequencia(ids=IDS, bloco_agulha=2, codigo="", resposta=gerado), "cpu")
+    errado = [(gerado[0] + 1) % 200] + gerado[1:]
+    assert not responde_certo(modelo, Sequencia(ids=IDS, bloco_agulha=2, codigo="", resposta=errado), "cpu")
 
 
 def test_agrupar_kv_bate_com_a_media_manual():

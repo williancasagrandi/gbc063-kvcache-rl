@@ -115,7 +115,7 @@ def main():
         seq = montar_sequencia(corpo, prefixo, codigo, ponto, pergunta, tokens, a.bloco, rng, codigo_txt)
 
         if verificar:  # antes de gravar a atenção, que é a parte cara
-            ok, _ = responde_certo(modelo, tok, seq, disp)
+            ok = responde_certo(modelo, seq, disp)
             tentativas, acertos = tentativas + 1, acertos + int(ok)
             barra.set_postfix(acerto=f"{acertos / tentativas:.0%}")
             if a.exigir_acerto and not ok:

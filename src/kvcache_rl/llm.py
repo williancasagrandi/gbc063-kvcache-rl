@@ -22,7 +22,7 @@ só quando chamadas, para o resto do pacote funcionar sem elas.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -43,7 +43,8 @@ MODELOS = {
 class Sequencia:
     ids: list[int]
     bloco_agulha: int
-    codigo: str
+    codigo: str  # a senha em texto, ex. "4821"
+    resposta: list[int] = field(default_factory=list)  # os tokens da senha, que o modelo deve gerar
 
 
 @dataclass
@@ -101,7 +102,7 @@ def montar_sequencia(
     assert len(ids) == total
 
     fim_codigo = p + len(prefixo) + len(codigo) - 1  # último token do código
-    return Sequencia(ids=ids, bloco_agulha=fim_codigo // bloco, codigo=codigo_txt)
+    return Sequencia(ids=ids, bloco_agulha=fim_codigo // bloco, codigo=codigo_txt, resposta=list(codigo))
 
 
 def agrupar_kv(att: np.ndarray, por_grupo: int) -> np.ndarray:
@@ -133,16 +134,22 @@ def ler_arquitetura(modelo) -> Arquitetura:
     return Arquitetura(camadas=int(camadas), consultas=int(consultas), kv=int(kv), max_tokens=int(maximo))
 
 
-def carregar_modelo(nome: str, dispositivo: str | None = None):
-    """Devolve (tokenizador, modelo, dispositivo, arquitetura)."""
+def carregar_modelo(nome: str, dispositivo: str | None = None, precisao: str = "auto"):
+    """Devolve (tokenizador, modelo, dispositivo, arquitetura).
+
+    precisao: "auto" (GPU: bfloat16 ou float16; CPU: float32), "float32", "bfloat16" ou "float16".
+    Para gravar a atenção, "auto" basta. Para medir pequenas diferenças de perplexidade
+    entre políticas, use float32: em bfloat16 o arredondamento já muda a NLL na 3ª casa.
+    """
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.utils import logging
 
     logging.set_verbosity_error()  # silencia avisos repetidos de generate()
     dispositivo = dispositivo or ("cuda" if torch.cuda.is_available() else "cpu")
-    # na GPU, bfloat16 (ou float16) cabe folgado e é mais rápido; na CPU, float32 é mais rápido
-    if dispositivo == "cpu":
+    if precisao != "auto":
+        dtype = getattr(torch, precisao)
+    elif dispositivo == "cpu":
         dtype = torch.float32
     else:
         dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
@@ -240,16 +247,59 @@ def gerar_trace(modelo, seq: Sequencia, bloco: int, dispositivo: str, nome: str,
     cab = atencao_por_cabeca(modelo, seq.ids, bloco, dispositivo, por_grupo)
     camadas = cab.mean(axis=1)
     return Trace(att=camadas.mean(axis=0).astype(np.float32), bloco=bloco, agulha=seq.bloco_agulha,
-                 nome=nome, camadas=camadas.astype(np.float16), cabecas=cab.astype(np.float16))
+                 nome=nome, camadas=camadas.astype(np.float16), cabecas=cab.astype(np.float16),
+                 ids=np.asarray(seq.ids, dtype=np.int32), resposta=np.asarray(seq.resposta, dtype=np.int32),
+                 modelo=getattr(modelo, "name_or_path", "") or "")
 
 
-def responde_certo(modelo, tok, seq: Sequencia, dispositivo: str, max_novos: int = 8) -> tuple[bool, str]:
-    """Com o cache COMPLETO, o modelo acerta a senha? Mede se a tarefa faz sentido para ele."""
+def passada(modelo, ids, dispositivo: str, referencia=None, pedaco: int = 256) -> dict:
+    """Um forward pelo texto. Para cada posição t (T - 1 posições) devolve:
+        nll[t]   = -log p(ids[t+1] | ids[:t+1])   (em nats)
+        certo[t] = o token mais provável (decodificação gulosa) é ids[t+1]
+        kl[t]    = KL(p_ref || p) na distribuição do próximo token, se `referencia` for
+                   o "h" de outra passada (em geral, a do cache completo)
+        h        = estados ocultos finais (T, d), para servir de referência depois
+    Se houver uma Mascara ativa (modelo_real.py), o forward é com o cache podado.
+    Os logits saem em pedaços: no Qwen o vocabulário tem 151 mil tokens e os logits do
+    texto inteiro ocupariam centenas de MB. Por isso a referência é guardada como
+    estados ocultos (3,6 MB num texto de 1.024 tokens) e os logits dela são refeitos.
+    """
     import torch
+    import torch.nn.functional as F
 
+    x = torch.as_tensor(np.asarray(ids), dtype=torch.long, device=dispositivo).unsqueeze(0)
+    cabeca = modelo.get_output_embeddings()
+    nll, certo, kl = [], [], []
     with torch.no_grad():
-        x = torch.tensor([seq.ids], device=dispositivo)
-        saida = modelo.generate(x, attention_mask=torch.ones_like(x), max_new_tokens=max_novos,
-                                do_sample=False, pad_token_id=tok.eos_token_id)
-    resposta = tok.decode(saida[0, len(seq.ids):], skip_special_tokens=True)
-    return seq.codigo in resposta, resposta.strip()
+        h = modelo.base_model(input_ids=x, use_cache=False).last_hidden_state[0]  # (T, d)
+        alvo = x[0, 1:]
+        for ini in range(0, alvo.shape[0], pedaco):
+            fim = min(ini + pedaco, alvo.shape[0])
+            logits = cabeca(h[ini:fim]).float()
+            a = alvo[ini:fim]
+            nll.append(F.cross_entropy(logits, a, reduction="none").cpu())
+            certo.append((logits.argmax(dim=-1) == a).cpu())
+            if referencia is not None:
+                log_ref = F.log_softmax(cabeca(referencia[ini:fim]).float(), dim=-1)
+                log_p = F.log_softmax(logits, dim=-1)
+                kl.append((log_ref.exp() * (log_ref - log_p)).sum(dim=-1).clamp_min(0).cpu())
+    return {"nll": torch.cat(nll).double().numpy(), "certo": torch.cat(certo).numpy(),
+            "kl": torch.cat(kl).double().numpy() if kl else None, "h": h}
+
+
+def nll_e_acertos(modelo, ids, dispositivo: str, pedaco: int = 256) -> tuple[np.ndarray, np.ndarray]:
+    """Atalho para passada(): só (nll, certo)."""
+    r = passada(modelo, ids, dispositivo, pedaco=pedaco)
+    return r["nll"], r["certo"]
+
+
+def responde_certo(modelo, seq: Sequencia, dispositivo: str) -> bool:
+    """Com o cache COMPLETO, a decodificação gulosa produz exatamente os tokens da senha?
+
+    Teacher forcing: alimentamos texto + senha e conferimos se, em cada posição da
+    senha, o token mais provável é o certo. Isso é idêntico a gerar gulosamente e
+    comparar, e é a mesma definição de acerto usada na avaliação com cache podado.
+    """
+    n = len(seq.ids)
+    _, certo = nll_e_acertos(modelo, list(seq.ids) + list(seq.resposta), dispositivo)
+    return bool(certo[n - 1:n - 1 + len(seq.resposta)].all())

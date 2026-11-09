@@ -6,8 +6,12 @@ Dinâmica de um episódio:
      Ao final do bloco, o cache tem orcamento + 1 blocos e o agente escolhe
      um para despejar. Despejado, o bloco nunca mais volta.
   3. A recompensa é menos a atenção média que os tokens do próximo bloco dariam
-     aos blocos já despejados (atenção "perdida").
-  4. No fim do texto, ganha um bônus se a agulha ainda está no cache.
+     aos blocos já despejados (atenção "perdida"). O retorno do episódio é, então,
+     menos a atenção perdida acumulada: é o único objetivo do agente.
+  4. (Opcional, desligado por padrão) bônus no fim do texto se a agulha ainda está
+     no cache. Desligado porque usa informação que a política não teria (onde está
+     a agulha) e dominava o retorno; a agulha é medida na avaliação, no LLM real
+     (scripts/avaliar_no_modelo.py), e não entra no treino.
 
 Três modos, sempre com o mesmo orçamento (16 blocos) em cada cache:
 
@@ -24,11 +28,11 @@ Nos modos por camada e por cabeça, o mesmo agente serve para todas as unidades
 caches não interagem: juntar várias unidades no mesmo episódio faria o "próximo
 estado" de uma decisão ser o cache de outra unidade, que o agente não vê.
 
-A agulha só importa para quem a consulta. Por isso o bônus de cada unidade é
-`bonus_agulha` vezes a relevância dela: a atenção que a pergunta final dá à
-agulha naquela unidade, dividida pela da unidade que mais a consulta. A métrica
-"agulha" de um texto é a fração dessa atenção que foi preservada: no modo
-geral é 0 ou 1; por camada/cabeça, a média ponderada das unidades.
+Diagnóstico da agulha no proxy (não entra na recompensa por padrão): a métrica
+"agulha" de um texto é a fração da atenção que a pergunta final dá à agulha que
+foi preservada (no modo geral é 0 ou 1; por camada/cabeça, a média das unidades
+ponderada pelo quanto cada uma consulta a agulha). Se `bonus_agulha` > 0, o
+bônus de cada unidade é `bonus_agulha` vezes essa relevância normalizada.
 
 Ação: índice em {0, ..., orcamento}. Os candidatos ficam ordenados por posição
 no texto, então o índice `orcamento` é sempre o bloco que acabou de chegar.
@@ -61,7 +65,7 @@ class KVCacheEnv(gym.Env):
         orcamento: int = 16,
         janela_recente: int = 2,
         n_sink: int = 1,
-        bonus_agulha: float = 10.0,
+        bonus_agulha: float = 0.0,
         modo: str = "geral",
         render_mode: str | None = None,
     ):

@@ -62,8 +62,9 @@ Extensão prevista: uma ação de "comprimir" (quantizar para 4 bits) em vez de 
 Rodar o LLM a cada decisão de treino seria lento demais. Por isso usamos um **ambiente proxy**:
 
 1. O LLM lê cada texto **uma única vez**, com o cache completo, e a atenção é gravada num *trace*: para cada cabeça de K/V, quanto os tokens de cada bloco consultam cada bloco anterior. O trace guarda também as médias por camada e do modelo todo.
-2. O ambiente (`KVCacheEnv`, Gymnasium) simula os despejos a partir do trace: a cada bloco novo, o agente escolhe quem sai e perde a atenção que os próximos tokens dariam aos blocos já apagados.
-3. Cada texto tem uma **agulha** ("the secret code is NNNN") inserida em posição aleatória no primeiro quarto do texto, fora do bloco inicial, e uma pergunta sobre ela no final.
+2. O ambiente (`KVCacheEnv`, Gymnasium) simula os despejos a partir do trace: a cada bloco novo, o agente escolhe quem sai e perde a atenção que os próximos tokens dariam aos blocos já apagados. **A recompensa é só isso: menos a atenção perdida.** O retorno de um episódio é menos a atenção perdida acumulada.
+3. Cada texto tem uma **agulha** ("the secret code is NNNN") inserida em posição aleatória no primeiro quarto do texto, fora do bloco inicial, e uma pergunta sobre ela no final. Ela **não entra na recompensa**: serve só para testar, no fim, se o modelo ainda recupera uma informação distante.
+4. Ao final, cada política é avaliada **no próprio LLM**, com o cache podado: quanto a perplexidade do texto sobe e se o modelo ainda acerta a senha (ver [Métricas](#métricas-o-que-medimos-e-por-quê)).
 
 Como o agente só decide nas fronteiras de bloco, o trace guarda a atenção **média dos tokens de cada bloco**, e não token a token: a perda e todas as features saem exatamente iguais (há um teste que confere isso contra uma simulação token a token) e o arquivo fica 16 vezes menor.
 
@@ -94,7 +95,7 @@ Cada camada e cada cabeça presta atenção em coisas diferentes. Os modos não 
 
 Nos modos por camada e por cabeça, **o mesmo agente serve para todas as unidades** (parâmetros compartilhados) e cada unidade é um episódio separado. Os caches das unidades não interagem: se elas decidissem em sequência no mesmo episódio, o "próximo estado" de uma decisão seria o cache de outra unidade, que o agente não vê, e a propriedade de Markov se perderia. Para avaliar um texto, rodamos todas as unidades e tiramos a média. As regras fixas também passam a decidir por unidade (o H2O por cabeça é o método original).
 
-**A agulha só importa para quem a consulta.** Poucas cabeças buscam informação distante no contexto (as *retrieval heads*). Por isso, em cada unidade, o bônus da agulha é `10 ×` a relevância dela: a atenção que a pergunta final dá à agulha naquela unidade, dividida pela da unidade que mais a consulta. A métrica "agulha mantida" de um texto é a fração dessa atenção que foi preservada: no modo geral é 0 ou 1; por camada e por cabeça, a média ponderada das unidades. Assim, **atenção perdida e agulha mantida são comparáveis entre os modos**. O retorno não é, porque a escala do bônus muda, então ele só é comparado dentro de cada modo.
+**Os modos são comparáveis entre si.** A atenção perdida é linear na matriz de atenção: aplicar a mesma decisão em todas as unidades e tirar a média dá exatamente a perda medida na matriz média. Ou seja, o modo geral equivale a aplicar uma decisão única nos 144 / 48 caches, e o que os modos mais finos acrescentam é só a liberdade de decidir diferente em cada um. No LLM real a comparação é direta: mesmo modelo, mesmos textos, mesmo orçamento em cada cache.
 
 ### DQN
 
@@ -105,11 +106,26 @@ Stable-Baselines3 com `MlpPolicy`: uma saída Q(s, a) para cada um dos 17 candid
 | `n_timesteps` | 200.000 | 300.000 | 500.000 | ~4.250, ~6.400 e ~10.600 episódios de 47 decisões |
 | `policy_kwargs.net_arch` | 128×128 | 128×128 | 256×256 | por cabeça o agente aprende o papel de até 144 unidades |
 | `learning_starts` | 5.000 | 5.000 | 5.000 | episódios curtos; não precisa de 100 mil passos aleatórios |
-| `exploration_fraction` | 0,3 | 0,3 | 0,3 | ε de 1,0 a 0,05; explorar mais para achar o prêmio da agulha |
+| `exploration_fraction` | 0,3 | 0,3 | 0,3 | ε de 1,0 a 0,05 nos primeiros 30% do treino |
 | `buffer_size` | 100k | 100k | 200k | |
 | `learning_rate`, `train_freq`, `target_update_interval` | 1e-4, 4, 1.000 | iguais | iguais | como no Atari |
 
 A política gulosa (sem exploração) é avaliada nos 50 textos de teste, em todas as unidades, a cada 5.000 / 10.000 / 25.000 passos. Treinamos com 3 sementes.
+
+### Métricas: o que medimos e por quê
+
+A atenção perdida é um **proxy**: rápida de calcular, por isso serve para treinar, mas não diz o que acontece com o texto que o modelo prevê. Uma versão anterior também dava um bônus de `+10` por manter a agulha no cache; ele foi removido porque usava informação que a política não teria (onde está a agulha) e dominava o retorno (97% da diferença entre o H2O e o oráculo vinha dele). As métricas finais são medidas no LLM:
+
+| Métrica | O que é | Onde |
+|---|---|---|
+| **Aumento da perplexidade** (principal) | `exp(ΔNLL) − 1`, com ΔNLL = aumento médio da NLL por token com o cache podado, contra o cache completo, nas previsões feitas depois que o cache enche | LLM real |
+| **Senha recuperada** | a decodificação gulosa ainda produz a senha inteira; só nos textos em que o modelo acerta com o cache completo | LLM real |
+| Atenção perdida | atenção que os blocos apagados receberiam com o cache completo | proxy (treino) |
+| Proxy × real | correlação de Spearman entre atenção perdida e ΔNLL, **dentro de cada texto** (as políticas competem no mesmo texto) | os dois |
+
+**Como o LLM é avaliado com o cache podado.** Despejar um bloco do KV-cache equivale a proibir que as consultas seguintes o vejam. Então os despejos de uma política viram uma máscara de atenção — uma por camada, ou por cabeça de K/V — e um único forward com essa máscara dá exatamente o que o modelo calcularia apagando os blocos do cache durante a leitura (as posições dos tokens que ficam não mudam, como no H2O e no SnapKV). Ao contrário do proxy, aqui o softmax renormaliza: a atenção que iria para um bloco apagado se redistribui entre os que ficaram, como no modelo de verdade. O teste `test_mascara_igual_a_despejo_fisico` confere, no Qwen2 e no GPT-2, que os logits saem iguais aos de um KV-cache do qual os blocos foram de fato apagados.
+
+As diferenças entre políticas são **pareadas** (mesmos textos) e vêm com intervalo de 95%: o script diz, para cada política, se ela é melhor, pior ou empata com o H2O. A avaliação roda em float32 por padrão, porque em bfloat16 o arredondamento já mexe na NLL na terceira casa.
 
 ### Como rodar
 
@@ -118,7 +134,7 @@ Requer Python 3.10+ (no Debian/Ubuntu: `sudo apt install python3-venv`).
 ```bash
 make setup-llm              # cria .venv e instala tudo (PyTorch, SB3, transformers)
 make teste                  # testes do ambiente e da gravação da atenção
-make tudo-modos             # traces do GPT-2 -> os três modos (baselines, DQN, gráficos) -> comparação
+make tudo-modos             # traces do GPT-2 -> três modos (baselines, DQN, avaliação no LLM) -> comparação
 make tudo-modos FONTE=qwen  # o mesmo com o Qwen2.5-0.5B, em dados/qwen e resultados/qwen
 ```
 
@@ -131,12 +147,16 @@ Etapa por etapa (troque `qwen` por `gpt2` para o outro modelo):
 .venv/bin/python scripts/avaliar_baselines.py --fonte qwen --modo por_cabeca
 .venv/bin/python scripts/treinar_dqn.py --fonte qwen --modo por_cabeca      # resultados/qwen/por_cabeca/dqn/seed{0,1,2}
 .venv/bin/python scripts/graficos.py --fonte qwen --modo por_cabeca         # resultados/qwen/por_cabeca/figuras
-.venv/bin/python scripts/comparar_modos.py --fonte qwen                     # depois de rodar os três modos
+.venv/bin/python scripts/avaliar_no_modelo.py --fonte qwen --modo por_cabeca  # perplexidade e senha no LLM
+.venv/bin/python scripts/comparar_modos.py --fonte qwen                     # proxy, os três modos
+.venv/bin/python scripts/graficos_modelo_real.py --fonte qwen               # LLM real, os três modos
 ```
 
 Contextos mais longos: `--tokens 2048` ou `--tokens 4096` (o Qwen aceita até 32 mil). O custo da gravação cresce com o quadrado do número de tokens, e numa GPU de 6 GB o 4.096 ainda cabe. Para o episódio continuar do mesmo tamanho, aumente o bloco junto: `--tokens 4096 --bloco 64` mantém os 64 blocos e o orçamento de 16.
 
-Tempo aproximado num notebook: traces de 2 a 10 min (GPU) ou 10 a 30 min (CPU); DQN por semente cerca de 2,5 min no `geral`, 4 min no `por_camada` e 12 min no `por_cabeca` com 144 caches (menos no Qwen, que tem 48). O `make tudo-modos` inteiro leva cerca de 1 hora.
+Tempo aproximado num notebook: traces de 2 a 10 min (GPU) ou 10 a 30 min (CPU); DQN por semente cerca de 2,5 min no `geral`, 4 min no `por_camada` e 12 min no `por_cabeca` com 144 caches (menos no Qwen, que tem 48); avaliação no LLM, por modo, alguns minutos na GPU (um forward por texto e política: 50 × 8). O `make tudo-modos` inteiro leva cerca de 1 hora e meia.
+
+Os traces gravados antes desta versão não guardavam os tokens do texto e não servem para a avaliação no LLM: gere-os de novo (`make traces FONTE=qwen`).
 
 ### Saídas
 
@@ -146,8 +166,13 @@ Tempo aproximado num notebook: traces de 2 a 10 min (GPU) ou 10 a 30 min (CPU); 
 | `resultados/<fonte>/<modo>/dqn/seed*/curva.csv` | avaliação no teste ao longo do treino |
 | `resultados/<fonte>/<modo>/dqn/seed*/final.json` | avaliação do modelo final (= último ponto da curva) |
 | `resultados/<fonte>/<modo>/figuras/curva_aprendizado.png` | retorno no teste ao longo do treino, com as políticas de referência |
-| `resultados/<fonte>/<modo>/figuras/comparacao_final.png` | atenção perdida e agulha mantida por política |
-| `resultados/<fonte>/comparacao_modos.png` e `.csv` | H2O, DQN e oráculo nos três modos |
+| `resultados/<fonte>/<modo>/figuras/comparacao_final.png` | atenção perdida e agulha no cache (proxy) por política |
+| `resultados/<fonte>/<modo>/modelo_real.csv` | **por política: aumento da perplexidade e senha recuperada no LLM**, com IC de 95% |
+| `resultados/<fonte>/<modo>/modelo_real_textos.csv` | o mesmo, texto a texto, com a atenção perdida ao lado |
+| `resultados/<fonte>/<modo>/modelo_real_resumo.json` | correlação proxy × real e diferenças pareadas contra o H2O |
+| `resultados/<fonte>/comparacao_modos_real.png` | **H2O, DQN e oráculo nos três modos, medidos no LLM** |
+| `resultados/<fonte>/proxy_x_real.png` | atenção perdida × aumento da perplexidade, por texto e política |
+| `resultados/<fonte>/comparacao_modos.png` e `.csv` | H2O, DQN e oráculo nos três modos, no proxy |
 
 ### Estrutura
 
@@ -156,11 +181,12 @@ configs/dqn.yml                  hiperparâmetros do DQN, um bloco por modo
 src/kvcache_rl/
   env.py                         ambiente Gymnasium (KVCacheEnv) com os três modos
   traces.py                      formato dos traces (por bloco; modelo, camada e cabeça) e gerador sintético
-  llm.py                         gravação da atenção por cabeça de K/V (GPT-2, Qwen) e inserção da agulha
+  llm.py                         gravação da atenção por cabeça de K/V (GPT-2, Qwen), agulha e NLL
+  modelo_real.py                 despejos de uma política -> máscara de atenção no LLM real; métricas
   baselines.py                   janela deslizante, StreamingLLM, H2O, aleatória, oráculo e avaliação
   config.py, visual.py           leitura do dqn.yml e estilo dos gráficos
-scripts/                         gerar traces, avaliar, treinar, gráficos, comparar modos
-tests/                           testes do ambiente
+scripts/                         gerar traces, avaliar (proxy e LLM), treinar, gráficos, comparar modos
+tests/                           ambiente, gravação da atenção e equivalência máscara = despejo de verdade
 ```
 
 ## Entregas
