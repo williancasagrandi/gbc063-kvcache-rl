@@ -23,7 +23,7 @@ from kvcache_rl.config import CHAVES, NOMES_MODOS
 from kvcache_rl.visual import FONTES, TEMAS, estilo, grafico_modos, num, preparar_matplotlib
 
 plt = preparar_matplotlib()
-SERIES = [("h2o", "H2O (melhor regra fixa)"), ("dqn", "DQN"), ("oraculo", "Oráculo (vê o futuro)")]
+SERIES = [("h2o", "H2O (melhor regra fixa)"), ("dqn", "DQN"), ("oraculo", "Oráculo do proxy (vê o futuro)")]
 
 
 def ler_textos(caminho: Path) -> list[dict]:

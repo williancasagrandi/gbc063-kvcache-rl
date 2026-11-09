@@ -125,6 +125,10 @@ A atenção perdida é um **proxy**: rápida de calcular, por isso serve para tr
 
 **Como o LLM é avaliado com o cache podado.** Despejar um bloco do KV-cache equivale a proibir que as consultas seguintes o vejam. Então os despejos de uma política viram uma máscara de atenção — uma por camada, ou por cabeça de K/V — e um único forward com essa máscara dá exatamente o que o modelo calcularia apagando os blocos do cache durante a leitura (as posições dos tokens que ficam não mudam, como no H2O e no SnapKV). Ao contrário do proxy, aqui o softmax renormaliza: a atenção que iria para um bloco apagado se redistribui entre os que ficaram, como no modelo de verdade. O teste `test_mascara_igual_a_despejo_fisico` confere, no Qwen2 e no GPT-2, que os logits saem iguais aos de um KV-cache do qual os blocos foram de fato apagados.
 
+**Comparação justa.** O DQN escolhe os pesos dele nos textos de treino, minimizando a atenção perdida. As regras com parâmetro recebem o mesmo tratamento: `avaliar_baselines.py` escolhe, numa grade e **nos textos de treino**, quantos blocos recentes o H2O protege (de 0 até o orçamento inteiro) e quantos blocos de sink o StreamingLLM mantém (1 a 4), pelo mesmo critério. Ajustá-las pela KL no modelo real daria a elas um sinal melhor que o do DQN, e a injustiça só trocaria de lado. O teste não escolhe nada; o parâmetro escolhido e a grade inteira ficam em `ajuste.json`.
+
+O **oráculo do proxy** olha o futuro e despeja o bloco que receberá menos atenção. Ele serve de referência para o proxy, mas **não é limite superior**: é guloso, então nem no proxy é o ótimo garantido, e minimiza a atenção perdida, não a qualidade no LLM. Num GPT-2 pequeno treinado para recuperar a senha, ele perdeu do H2O na KL no modo geral.
+
 As diferenças entre políticas são **pareadas** (mesmos textos) e vêm com intervalo de 95%: o script diz, para cada política, se ela é melhor, pior ou empata com o H2O. A avaliação roda em float32 por padrão, porque em bfloat16 o arredondamento já mexe na NLL na terceira casa.
 
 ### Como rodar
@@ -144,7 +148,7 @@ Etapa por etapa (troque `qwen` por `gpt2` para o outro modelo):
 
 ```bash
 .venv/bin/python scripts/gerar_traces_llm.py --fonte qwen                   # dados/qwen/{treino,teste}
-.venv/bin/python scripts/avaliar_baselines.py --fonte qwen --modo por_cabeca
+.venv/bin/python scripts/avaliar_baselines.py --fonte qwen --modo por_cabeca   # ajusta H2O/StreamingLLM no treino
 .venv/bin/python scripts/treinar_dqn.py --fonte qwen --modo por_cabeca      # resultados/qwen/por_cabeca/dqn/seed{0,1,2}
 .venv/bin/python scripts/graficos.py --fonte qwen --modo por_cabeca         # resultados/qwen/por_cabeca/figuras
 .venv/bin/python scripts/avaliar_no_modelo.py --fonte qwen --modo por_cabeca  # perplexidade e senha no LLM
@@ -162,7 +166,8 @@ Os traces gravados antes desta versão não guardavam os tokens do texto e não 
 
 | Arquivo | Conteúdo |
 |---|---|
-| `resultados/<fonte>/<modo>/baselines.csv` | retorno, atenção perdida e agulha de cada política de referência |
+| `resultados/<fonte>/<modo>/baselines.csv` | retorno, atenção perdida e agulha (proxy) de cada política de referência, no teste |
+| `resultados/<fonte>/<modo>/ajuste.json` | parâmetros do H2O e do StreamingLLM escolhidos nos textos de treino, com a grade inteira |
 | `resultados/<fonte>/<modo>/dqn/seed*/curva.csv` | avaliação no teste ao longo do treino |
 | `resultados/<fonte>/<modo>/dqn/seed*/final.json` | avaliação do modelo final (= último ponto da curva) |
 | `resultados/<fonte>/<modo>/figuras/curva_aprendizado.png` | retorno no teste ao longo do treino, com as políticas de referência |
@@ -170,9 +175,9 @@ Os traces gravados antes desta versão não guardavam os tokens do texto e não 
 | `resultados/<fonte>/<modo>/modelo_real.csv` | **por política: aumento da perplexidade e senha recuperada no LLM**, com IC de 95% |
 | `resultados/<fonte>/<modo>/modelo_real_textos.csv` | o mesmo, texto a texto, com a atenção perdida ao lado |
 | `resultados/<fonte>/<modo>/modelo_real_resumo.json` | correlação proxy × real e diferenças pareadas contra o H2O |
-| `resultados/<fonte>/comparacao_modos_real.png` | **H2O, DQN e oráculo nos três modos, medidos no LLM** |
+| `resultados/<fonte>/comparacao_modos_real.png` | **H2O, DQN e oráculo do proxy nos três modos, medidos no LLM** |
 | `resultados/<fonte>/proxy_x_real.png` | atenção perdida × aumento da perplexidade, por texto e política |
-| `resultados/<fonte>/comparacao_modos.png` e `.csv` | H2O, DQN e oráculo nos três modos, no proxy |
+| `resultados/<fonte>/comparacao_modos.png` e `.csv` | H2O, DQN e oráculo do proxy nos três modos, no proxy |
 
 ### Estrutura
 
@@ -183,7 +188,7 @@ src/kvcache_rl/
   traces.py                      formato dos traces (por bloco; modelo, camada e cabeça) e gerador sintético
   llm.py                         gravação da atenção por cabeça de K/V (GPT-2, Qwen), agulha e NLL
   modelo_real.py                 despejos de uma política -> máscara de atenção no LLM real; métricas
-  baselines.py                   janela deslizante, StreamingLLM, H2O, aleatória, oráculo e avaliação
+  baselines.py                   janela deslizante, StreamingLLM, H2O, aleatória, oráculo do proxy, ajuste e avaliação
   config.py, visual.py           leitura do dqn.yml e estilo dos gráficos
 scripts/                         gerar traces, avaliar (proxy e LLM), treinar, gráficos, comparar modos
 tests/                           ambiente, gravação da atenção e equivalência máscara = despejo de verdade

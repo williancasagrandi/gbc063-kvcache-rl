@@ -75,12 +75,15 @@ def test_pipeline_com_llm(tmp_path):
     rodar("gerar_traces_llm.py", "--modelo", "mini", "--fonte", "mini", "--textos", "textos",
           "--tokens", "320", "--n-treino", "3", "--n-teste", "2", cwd=tmp_path)
     for modo in ("geral", "por_camada", "por_cabeca"):
+        rodar("avaliar_baselines.py", "--fonte", "mini", "--modo", modo, "--config", config, cwd=tmp_path)
         rodar("treinar_dqn.py", "--fonte", "mini", "--modo", modo, "--config", config,
               "--sementes", "0", "--passos", "200", "--freq-avaliacao", "100", cwd=tmp_path)
         saida = rodar("avaliar_no_modelo.py", "--fonte", "mini", "--modo", modo, "--config", config, cwd=tmp_path)
         assert "dqn_seed0" in saida and "KL" in saida
+        assert "ajustadas no treino" in saida  # as regras fixas usam o parâmetro escolhido no treino
         res = tmp_path / "resultados" / "mini" / modo
         assert (res / "modelo_real.csv").exists() and (res / "modelo_real_resumo.json").exists()
+        assert (res / "ajuste.json").exists()
     rodar("graficos_modelo_real.py", "--fonte", "mini", cwd=tmp_path)
     for nome in ("comparacao_modos_real.png", "proxy_x_real.png"):
         assert (tmp_path / "resultados" / "mini" / nome).exists()

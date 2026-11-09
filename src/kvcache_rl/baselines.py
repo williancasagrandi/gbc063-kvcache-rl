@@ -1,7 +1,18 @@
 """Políticas de referência e avaliação. Uma política recebe (env, obs, info)
-e devolve o índice do candidato a despejar."""
+e devolve o índice do candidato a despejar.
+
+Ajuste justo: o DQN é treinado nos textos de treino para minimizar a atenção
+perdida. As regras com parâmetro (H2O e StreamingLLM) recebem o mesmo tratamento:
+o parâmetro é escolhido numa grade, nos textos de treino, pelo mesmo critério
+(ajustar). Os textos de teste não são usados para escolher nada.
+"""
 
 from __future__ import annotations
+
+import itertools
+import json
+from functools import partial
+from pathlib import Path
 
 import numpy as np
 
@@ -15,26 +26,34 @@ def janela_deslizante(env, obs, info):
     return int(np.argmin(info["candidatos"]))
 
 
-def streaming_llm(env, obs, info):
-    """Mantém os sinks e despeja o mais antigo entre os demais."""
+def streaming_llm(env, obs, info, n_sink: int | None = None):
+    """Mantém os `n_sink` primeiros blocos (os attention sinks) e despeja o mais antigo
+    entre os demais. Sem `n_sink`, usa o do ambiente (1 bloco = 16 tokens)."""
+    n = env.n_sink if n_sink is None else n_sink
     cand = info["candidatos"]
-    idade = np.where(cand >= env.n_sink, cand, np.iinfo(np.int64).max)
+    idade = np.where(cand >= n, cand, np.iinfo(np.int64).max)
     return int(np.argmin(idade))
 
 
-def h2o(env, obs, info, n_recentes: int = 4):
-    """Heavy-Hitter Oracle: protege os n mais recentes e despeja o menos atendido."""
+def h2o(env, obs, info, n_recentes: int | None = None):
+    """Heavy-Hitter Oracle: protege os `n_recentes` blocos mais recentes e despeja,
+    entre os outros, o que recebeu menos atenção acumulada até agora. Sem `n_recentes`,
+    metade do orçamento, como no artigo (metade recentes, metade heavy hitters)."""
+    n = env.B // 2 if n_recentes is None else n_recentes
     score = info["atencao_acumulada"].astype(np.float64).copy()
-    score[-n_recentes:] = np.inf
+    if n > 0:  # score[-0:] seria o vetor inteiro
+        score[-n:] = np.inf
     return int(np.argmin(score))
 
 
 def oraculo(env, obs, info):
-    """Despeja o bloco que receberá menos atenção no resto do texto.
+    """Oráculo do proxy: despeja o bloco que receberá menos atenção no resto do texto.
 
-    Não é implementável na prática (olha o futuro) e serve de referência. É guloso:
-    decide um passo de cada vez, então é um limite muito bom, mas não o ótimo
-    garantido. Se a recompensa tiver bônus de agulha, também nunca despeja a agulha.
+    Olha o futuro, então não é implementável; serve de referência para o proxy.
+    NÃO é limite superior: é guloso (decide um passo de cada vez), então nem no
+    proxy é o ótimo garantido; e minimiza a atenção perdida, não a qualidade no LLM
+    (na validação com um modelo treinado, perdeu do H2O na KL no modo geral).
+    Se a recompensa tiver bônus de agulha, também nunca despeja a agulha.
     """
     futura = env.massa_futura()
     if env.bonus_agulha > 0 and env.trace.agulha >= 0:
@@ -56,9 +75,54 @@ NOMES = {
     "janela_deslizante": "Janela deslizante",
     "streaming_llm": "StreamingLLM",
     "h2o": "H2O",
-    "oraculo": "Oráculo",
+    "oraculo": "Oráculo do proxy",
     "dqn": "DQN",
 }
+
+# Grades de ajuste (em blocos). Uma lista fixa ou uma função do ambiente.
+# StreamingLLM: 1 a 4 blocos de sink (o artigo usa 4 tokens, que cabem no 1º bloco;
+#   0 seria a janela deslizante, que já é outra política).
+# H2O: o artigo divide o orçamento entre recentes e "heavy hitters"; aqui o parâmetro
+#   é quantos recentes proteger, e a grade cobre TODOS os valores (0 = só heavy hitters,
+#   orçamento = só recentes, igual à janela deslizante), para o ótimo nunca ficar de fora.
+PARAMETROS = {
+    "streaming_llm": {"n_sink": [1, 2, 3, 4]},
+    "h2o": {"n_recentes": lambda env: list(range(env.B + 1))},
+}
+
+
+def grade_de(nome: str, env) -> dict:
+    """A grade de `nome` com os valores resolvidos para este ambiente."""
+    return {k: (v(env) if callable(v) else list(v)) for k, v in PARAMETROS[nome].items()}
+
+
+def com_parametros(nome: str, params: dict | None = None):
+    """A política `nome` com os parâmetros dados (sem parâmetros: a própria função)."""
+    return partial(BASELINES[nome], **params) if params else BASELINES[nome]
+
+
+def ajustar(env_treino, nome: str) -> dict:
+    """Escolhe os parâmetros de `nome` que minimizam a atenção perdida nos textos de treino.
+
+    É o mesmo critério e os mesmos dados que o DQN usa no treino. Empates ficam com
+    o primeiro da grade. Devolve {"melhor": {...}, "grade": [{params..., atencao_perdida}]}.
+    """
+    grade = grade_de(nome, env_treino)
+    resultados = []
+    for valores in itertools.product(*grade.values()):
+        params = dict(zip(grade, valores))
+        r = avaliar(env_treino, com_parametros(nome, params))
+        resultados.append({**params, "atencao_perdida": r["atencao_perdida"]})
+    melhor = min(resultados, key=lambda r: r["atencao_perdida"])
+    return {"melhor": {k: melhor[k] for k in grade}, "grade": resultados}
+
+
+def politicas_ajustadas(caminho_ajuste: str | Path) -> tuple[dict, bool]:
+    """Políticas de referência com os parâmetros de ajuste.json, se existir.
+    Devolve (nome -> política, se o ajuste foi encontrado)."""
+    caminho = Path(caminho_ajuste)
+    ajuste = json.loads(caminho.read_text()) if caminho.exists() else {}
+    return {n: com_parametros(n, ajuste.get(n, {}).get("melhor")) for n in BASELINES}, caminho.exists()
 
 
 def avaliar(env, politica, seed: int = 0) -> dict:

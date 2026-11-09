@@ -127,7 +127,7 @@ def test_decidir_mais_fino_perde_menos(traces):
 
 
 @pytest.mark.parametrize("modo", MODOS)
-def test_oraculo_e_limite_superior(traces, modo):
+def test_oraculo_do_proxy_vence_as_regras_simples_no_proxy(traces, modo):
     env = KVCacheEnv(traces, orcamento=8, modo=modo)
     perdas = {n: avaliar(env, BASELINES[n])["atencao_perdida"] for n in ("oraculo", "janela_deslizante", "aleatoria")}
     assert perdas["oraculo"] <= perdas["janela_deslizante"]

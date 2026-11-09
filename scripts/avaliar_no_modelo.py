@@ -35,7 +35,7 @@ import numpy as np
 from tqdm import tqdm
 
 from kvcache_rl import KVCacheEnv, carregar_pasta
-from kvcache_rl.baselines import BASELINES
+from kvcache_rl.baselines import politicas_ajustadas
 from kvcache_rl.config import CHAVES, carregar_config
 from kvcache_rl.llm import MODELOS, carregar_modelo, passada
 from kvcache_rl.modelo_real import Mascara, despejos_do_texto, metricas, spearman, visibilidade_do_texto
@@ -113,7 +113,15 @@ def main():
                          f"{arq.camadas}x{arq.kv}: são de outro modelo")
     print(f"{nome_modelo} em {disp} ({a.precisao}): {arq}")
 
-    politicas = {n: dict(politica=BASELINES[n]) for n in a.politicas}
+    # regras fixas com os parâmetros ajustados nos textos de treino (avaliar_baselines.py)
+    ajustadas, achou = politicas_ajustadas(f"resultados/{a.fonte}/{a.modo}/ajuste.json")
+    if achou:
+        params = {n: p.keywords for n, p in ajustadas.items() if n in a.politicas and hasattr(p, "keywords")}
+        print("regras fixas ajustadas no treino: " + ", ".join(f"{n} {p}" for n, p in params.items()))
+    else:
+        print("aviso: sem ajuste.json; regras fixas com parâmetros padrão "
+              "(rode scripts/avaliar_baselines.py antes, para a comparação ser justa)")
+    politicas = {n: dict(politica=ajustadas[n]) for n in a.politicas}
     if not a.sem_dqn:
         for nome, rede in carregar_dqns(a.fonte, a.modo).items():
             politicas[nome] = dict(q_net=rede)

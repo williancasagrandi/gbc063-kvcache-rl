@@ -109,7 +109,7 @@ def comparacao_final(baselines, finais, t, saida: Path, modo: str):
         vmax = max(l[col + 2] if l[col + 2] is not None else l[col] for l in linhas)
         for yi, l in zip(y, linhas):
             k, v, lo, hi = l[0], l[col], l[col + 1], l[col + 2]
-            if k == "oraculo":  # limite superior: só contorno
+            if k == "oraculo":  # referência que vê o futuro: só contorno
                 ax.barh(yi, v, height=0.62, color="none", edgecolor=t["referencia"], linewidth=1.2,
                         linestyle=(0, (4, 3)))
             else:
@@ -131,7 +131,7 @@ def comparacao_final(baselines, finais, t, saida: Path, modo: str):
     for rot, l in zip(eixos[0].get_yticklabels(), linhas):
         rot.set_color(t["destaque"] if l[0] == "dqn" else t["texto"])
         rot.set_fontweight("bold" if l[0] == "dqn" else "normal")
-    nota = f"{NOMES_MODOS[modo]} · DQN: média de {len(finais)} sementes, traço = mín–máx · Oráculo (tracejado): limite superior"
+    nota = f"{NOMES_MODOS[modo]} · DQN: média de {len(finais)} sementes, traço = mín–máx · Oráculo do proxy (tracejado): vê o futuro, não é limite superior"
     if modo != "geral":
         nota += " · agulha ponderada pela atenção que cada unidade dá a ela"
     nota += " · métricas no LLM real: avaliar_no_modelo.py"

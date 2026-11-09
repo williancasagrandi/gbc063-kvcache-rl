@@ -249,7 +249,7 @@ class KVCacheEnv(gym.Env):
             "atencao_recente": f[:, 4],
         }
 
-    # usado só pelo oráculo (olha o futuro, serve de limite superior)
+    # usado só pelo oráculo do proxy (olha o futuro; é referência, não limite superior)
     def massa_futura(self) -> np.ndarray:
         ids = np.array(self.cache)
         return self.A[self.k + 1:, ids].sum(axis=0)

@@ -49,7 +49,7 @@ def grafico(linhas: list[dict], t: dict, saida: Path, fonte: str):
             l[f"dqn_{chave}_lo"], l[f"dqn_{chave}_hi"] = l[f"dqn_{chave}_min"], l[f"dqn_{chave}_max"]
     grafico_modos(
         plt, linhas,
-        series=[("h2o", "H2O (melhor regra fixa)"), ("dqn", "DQN"), ("oraculo", "Oráculo (vê o futuro)")],
+        series=[("h2o", "H2O (melhor regra fixa)"), ("dqn", "DQN"), ("oraculo", "Oráculo do proxy (vê o futuro)")],
         paineis=[("atencao_perdida", "Atenção perdida por token (%) — menor é melhor", 1, 100),
                  ("agulha", "Agulha no cache, proxy (%) — maior é melhor", 0, 100)],
         t=t, saida=saida,
