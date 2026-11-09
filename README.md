@@ -55,19 +55,79 @@ Extensão prevista: uma ação de "comprimir" (quantizar para 4 bits) em vez de 
 - **Terminal:** `+10` se a "agulha" (uma senha escondida no início do texto e perguntada no final) ainda estiver no cache.
 - A restrição de memória é dura (o cache nunca passa de `B`), então não há penalidade de estouro.
 
-## Plano ao longo da disciplina
+## Desafio 2: DQN no ambiente proxy
 
-| Etapa | Conteúdo da disciplina |
+### Como o ambiente funciona
+
+Rodar o LLM a cada decisão de treino seria lento demais. Por isso usamos um **ambiente proxy**:
+
+1. O GPT-2 lê cada texto **uma única vez**, com o cache completo, e a atenção de cada token para cada bloco (média sobre camadas e cabeças) é gravada num *trace*.
+2. O ambiente (`KVCacheEnv`, Gymnasium) simula os despejos a partir do trace: a cada bloco novo, o agente escolhe quem sai e perde a atenção que os próximos tokens dariam aos blocos já apagados.
+3. Cada texto tem uma **agulha** ("the secret code is NNNN") inserida em posição aleatória no primeiro quarto do texto, fora do bloco inicial, e uma pergunta sobre ela no final.
+
+Os textos vêm da WikiText-2, com 1.024 tokens cada (64 blocos de 16, orçamento de 16 blocos, 47 decisões por texto): 200 textos de treino e 50 de teste, sem sobreposição. Há também uma fonte **sintética** que imita esses padrões e roda sem GPU nem internet.
+
+### DQN
+
+Stable-Baselines3 com `MlpPolicy` (rede 128×128): 86 entradas, 17 saídas, Q(s, a) de despejar cada candidato. Hiperparâmetros em [`configs/dqn.yml`](configs/dqn.yml), no mesmo formato do `dqn.yml` da atividade de Atari:
+
+| Parâmetro | Valor | Por quê |
+|---|---|---|
+| `n_timesteps` | 200.000 | ~4.250 textos de 47 decisões |
+| `learning_starts` | 5.000 | episódios curtos; não precisa de 100 mil passos aleatórios |
+| `exploration_fraction` | 0,3 (ε de 1,0 a 0,05) | explorar mais para descobrir o prêmio da agulha |
+| `buffer_size`, `learning_rate`, `target_update_interval`, `train_freq` | 100k, 1e-4, 1.000, 4 | iguais ao Atari |
+
+A cada 5.000 passos, a política gulosa (sem exploração) é avaliada nos 50 textos de teste. Treinamos com 3 sementes.
+
+### Como rodar
+
+Requer Python 3.10+ (no Debian/Ubuntu: `sudo apt install python3-venv`).
+
+```bash
+make setup-gpt2      # cria .venv e instala tudo (PyTorch, SB3, transformers)
+make teste           # testes do ambiente
+make tudo            # traces do GPT-2 -> baselines -> DQN (3 sementes) -> gráficos
+```
+
+Sem GPU ou sem internet: `make setup && make tudo FONTE=sintetico`.
+
+Etapa por etapa (o que o `make tudo` faz):
+
+```bash
+.venv/bin/python scripts/gerar_traces_gpt2.py          # dados/gpt2/{treino,teste}
+.venv/bin/python scripts/avaliar_baselines.py --fonte gpt2
+.venv/bin/python scripts/treinar_dqn.py --fonte gpt2    # resultados/gpt2/dqn/seed{0,1,2}
+.venv/bin/python scripts/graficos.py --fonte gpt2       # resultados/gpt2/figuras
+```
+
+### Saídas
+
+| Arquivo | Conteúdo |
 |---|---|
-| Desafio 1: contextualização do problema (este repositório) | MDP, propriedade de Markov, POMDP |
-| Ambiente simulado e políticas de referência | MDP, avaliação de política |
-| Primeiro agente com DQN | controle sem modelo e aproximação de função |
-| Novas abordagens conforme o curso avança | gradiente de política, PPO, imitação, entre outros |
-| Validação num LLM pequeno (GPT-2) | — |
+| `resultados/<fonte>/baselines.csv` | retorno, atenção perdida e agulha de cada política de referência |
+| `resultados/<fonte>/dqn/seed*/curva.csv` | avaliação no teste a cada 5.000 passos |
+| `resultados/<fonte>/dqn/seed*/final.json` | avaliação do modelo final |
+| `resultados/<fonte>/figuras/curva_aprendizado.png` | retorno no teste ao longo do treino, com as políticas de referência |
+| `resultados/<fonte>/figuras/comparacao_final.png` | atenção perdida e agulha mantida por política |
+
+### Estrutura
+
+```
+configs/dqn.yml                  hiperparâmetros do DQN
+src/kvcache_rl/
+  env.py                         ambiente Gymnasium (KVCacheEnv)
+  traces.py                      formato dos traces e gerador sintético
+  gpt2.py                        gravação da atenção do GPT-2 e inserção da agulha
+  baselines.py                   janela deslizante, StreamingLLM, H2O, aleatória, oráculo
+scripts/                         gerar traces, avaliar, treinar, gráficos
+tests/                           testes do ambiente
+```
 
 ## Entregas
 
 - [x] **Desafio 1** — apresentação do problema: ambiente/estado, ações e recompensas — 29/10/2026 ([slides](apresentacoes/desafio1/))
+- [ ] **Desafio 2** — DQN no problema e gráficos dos resultados — 12/11/2026
 
 ## Referências
 
@@ -75,4 +135,6 @@ Extensão prevista: uma ação de "comprimir" (quantizar para 4 bits) em vez de 
 - Zhang et al. *H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models*. NeurIPS 2023. [arXiv:2306.14048](https://arxiv.org/abs/2306.14048)
 - Li et al. *SnapKV: LLM Knows What You are Looking for Before Generation*. 2024. [arXiv:2404.14469](https://arxiv.org/abs/2404.14469)
 - Kwon et al. *Efficient Memory Management for Large Language Model Serving with PagedAttention* (vLLM). SOSP 2023. [arXiv:2309.06180](https://arxiv.org/abs/2309.06180)
+- Mnih et al. *Human-level control through deep reinforcement learning* (DQN). Nature, 2015.
+- Merity et al. *Pointer Sentinel Mixture Models* (WikiText). 2016. [arXiv:1609.07843](https://arxiv.org/abs/1609.07843)
 - Sutton & Barto. *Reinforcement Learning: An Introduction*, 2ª ed., 2018.

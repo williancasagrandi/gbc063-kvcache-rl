@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kvcache-rl"
+version = "0.2.0"
+description = "Despejo de KV-cache em LLMs com aprendizagem por reforço (GBC063 - UFU)"
+authors = [{ name = "Ihury Kewin" }, { name = "Willian Casa Grandi" }]
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "gymnasium>=0.29"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
