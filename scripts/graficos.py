@@ -1,68 +1,26 @@
-"""Gera os gráficos dos resultados para os slides.
+"""Gera os gráficos de um modo para os slides.
 
-    python scripts/graficos.py --fonte gpt2
-    python scripts/graficos.py --fonte gpt2 --tema claro
+    python scripts/graficos.py --fonte gpt2 --modo geral
+    python scripts/graficos.py --fonte gpt2 --modo por_camada --tema claro
 
-Lê resultados/<fonte>/baselines.csv e resultados/<fonte>/dqn/seed*/
-e salva em resultados/<fonte>/figuras/:
+Lê resultados/<fonte>/<modo>/baselines.csv e resultados/<fonte>/<modo>/dqn/seed*/
+e salva em resultados/<fonte>/<modo>/figuras/:
     curva_aprendizado.png   retorno no teste ao longo do treino x políticas de referência
     comparacao_final.png    atenção perdida e agulha mantida por política
+Para comparar os três modos num gráfico só: scripts/comparar_modos.py
 """
 
 import argparse
-import csv
-import json
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 
 from kvcache_rl.baselines import NOMES
+from kvcache_rl.config import CHAVES, NOMES_MODOS
+from kvcache_rl.visual import FONTES, TEMAS, carregar_resultados, estilo, num, preparar_matplotlib
 
-TEMAS = {
-    # escuro = mesmo fundo dos slides
-    "escuro": dict(fundo="#12161D", texto="#F1F5F9", secundario="#9AA7B8", grade="#262D3A",
-                   eixo="#5B6778", barra="#5B6778", destaque="#C98500", referencia="#9AA7B8"),
-    "claro": dict(fundo="#FFFFFF", texto="#0B0B0B", secundario="#52514E", grade="#E9E8E4",
-                  eixo="#8A8880", barra="#B4B2AA", destaque="#2A78D6", referencia="#52514E"),
-}
 ORDEM = ["aleatoria", "janela_deslizante", "streaming_llm", "h2o", "dqn", "oraculo"]
-FONTES = {"gpt2": "GPT-2", "sintetico": "sintéticos"}
-
-
-def num(v: float, casas: int = 1) -> str:
-    """Número no formato brasileiro, com sinal de menos tipográfico."""
-    return f"{v:.{casas}f}".replace(".", ",").replace("-", "\u2212")
-
-
-def ler_csv(caminho: Path) -> list[dict]:
-    with open(caminho) as f:
-        return [{k: (v if k == "politica" else float(v)) for k, v in linha.items()} for linha in csv.DictReader(f)]
-
-
-def carregar(fonte: str):
-    base = Path(f"resultados/{fonte}")
-    baselines = {l["politica"]: l for l in ler_csv(base / "baselines.csv")}
-    pastas = sorted((base / "dqn").glob("seed*"))
-    curvas = [ler_csv(p / "curva.csv") for p in pastas if (p / "curva.csv").exists()]
-    finais = [json.loads((p / "final.json").read_text()) for p in pastas if (p / "final.json").exists()]
-    if not curvas:
-        raise SystemExit(f"nenhuma curva em {base / 'dqn'}; rode scripts/treinar_dqn.py antes")
-    n_teste = len(list(Path(f"dados/{fonte}/teste").glob("*.npz"))) or None
-    return baselines, curvas, finais, n_teste
-
-
-def estilo(ax, t):
-    ax.set_facecolor(t["fundo"])
-    for lado in ("top", "right", "left"):
-        ax.spines[lado].set_visible(False)
-    ax.spines["bottom"].set_color(t["eixo"])
-    ax.tick_params(colors=t["secundario"], labelsize=11, length=0)
-    ax.grid(axis="y", color=t["grade"], linewidth=0.8)
-    ax.set_axisbelow(True)
+plt = preparar_matplotlib()
 
 
 def espalhar(ys: list[float], folga: float) -> list[float]:
@@ -71,17 +29,15 @@ def espalhar(ys: list[float], folga: float) -> list[float]:
     pos = np.array(ys, dtype=float)[ordem]
     for i in range(1, len(pos)):
         pos[i] = max(pos[i], pos[i - 1] + folga)
-    centro = np.mean(ys) - np.mean(pos)
-    pos += min(0.0, centro)  # recentraliza só se subiu demais
+    pos += min(0.0, np.mean(ys) - np.mean(pos))  # recentraliza só se subiu demais
     out = np.empty_like(pos)
     out[ordem] = pos
     return out.tolist()
 
 
-def curva_aprendizado(baselines, curvas, n_teste, t, saida: Path, fonte: str):
-    passos = np.array([l["passos"] for l in curvas[0]]) / 1000
+def curva_aprendizado(baselines, curvas, n_teste, t, saida: Path, fonte: str, modo: str):
     n = min(len(c) for c in curvas)
-    passos = passos[:n]
+    passos = np.array([l["passos"] for l in curvas[0][:n]]) / 1000
     ret = np.array([[l["retorno"] for l in c[:n]] for c in curvas])
     media, lo, hi = ret.mean(0), ret.min(0), ret.max(0)
 
@@ -118,14 +74,14 @@ def curva_aprendizado(baselines, curvas, n_teste, t, saida: Path, fonte: str):
     ax.set_ylabel("retorno médio no teste", color=t["secundario"], fontsize=12)
     faixa = f" · faixa: mín–máx de {len(curvas)} sementes" if len(curvas) > 1 else ""
     textos = f"{n_teste} textos de teste" if n_teste else "textos de teste"
-    fig.text(0.06, 0.94, f"DQN ao longo do treino, avaliado sem exploração em {textos} {FONTES.get(fonte, fonte)}{faixa}",
-             color=t["secundario"], fontsize=12)
+    fig.text(0.06, 0.94, f"{NOMES_MODOS[modo]} · DQN avaliado sem exploração em {textos} "
+             f"{FONTES.get(fonte, fonte)}{faixa}", color=t["secundario"], fontsize=12)
     fig.subplots_adjust(left=0.08, right=0.80, top=0.89, bottom=0.12)
     fig.savefig(saida, facecolor=t["fundo"])
     plt.close(fig)
 
 
-def comparacao_final(baselines, finais, t, saida: Path):
+def comparacao_final(baselines, finais, t, saida: Path, modo: str):
     linhas = []
     for k in ORDEM:
         if k == "dqn":
@@ -175,8 +131,10 @@ def comparacao_final(baselines, finais, t, saida: Path):
     for rot, l in zip(eixos[0].get_yticklabels(), linhas):
         rot.set_color(t["destaque"] if l[0] == "dqn" else t["texto"])
         rot.set_fontweight("bold" if l[0] == "dqn" else "normal")
-    nota = "DQN: média de {} sementes, traço = mín–máx · Oráculo (tracejado) vê o futuro: limite superior".format(len(finais))
-    fig.text(0.16, 0.03, nota, color=t["secundario"], fontsize=11)
+    nota = f"{NOMES_MODOS[modo]} · DQN: média de {len(finais)} sementes, traço = mín–máx · Oráculo (tracejado): limite superior"
+    if modo == "por_camada":
+        nota += " · agulha = fração das camadas que a mantiveram"
+    fig.text(0.16, 0.03, nota, color=t["secundario"], fontsize=10.5)
     fig.subplots_adjust(left=0.16, right=0.97, top=0.88, bottom=0.12, wspace=0.12)
     fig.savefig(saida, facecolor=t["fundo"])
     plt.close(fig)
@@ -185,19 +143,20 @@ def comparacao_final(baselines, finais, t, saida: Path):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--fonte", default="gpt2")
+    p.add_argument("--modo", default="geral", choices=list(CHAVES))
     p.add_argument("--tema", choices=list(TEMAS), default="escuro")
     a = p.parse_args()
 
     t = TEMAS[a.tema]
-    from matplotlib import font_manager
-    instaladas = {f.name for f in font_manager.fontManager.ttflist}
-    plt.rcParams["font.family"] = next((f for f in ("Calibri", "Carlito") if f in instaladas), "DejaVu Sans")
-    baselines, curvas, finais, n_teste = carregar(a.fonte)
-    pasta = Path(f"resultados/{a.fonte}/figuras")
+    baselines, curvas, finais = carregar_resultados(a.fonte, a.modo)
+    if not curvas:
+        raise SystemExit(f"nenhuma curva em resultados/{a.fonte}/{a.modo}/dqn; rode scripts/treinar_dqn.py antes")
+    n_teste = len(list(Path(f"dados/{a.fonte}/teste").glob("*.npz"))) or None
+    pasta = Path(f"resultados/{a.fonte}/{a.modo}/figuras")
     pasta.mkdir(parents=True, exist_ok=True)
     sufixo = "" if a.tema == "escuro" else "_claro"
-    curva_aprendizado(baselines, curvas, n_teste, t, pasta / f"curva_aprendizado{sufixo}.png", a.fonte)
-    comparacao_final(baselines, finais, t, pasta / f"comparacao_final{sufixo}.png")
+    curva_aprendizado(baselines, curvas, n_teste, t, pasta / f"curva_aprendizado{sufixo}.png", a.fonte, a.modo)
+    comparacao_final(baselines, finais, t, pasta / f"comparacao_final{sufixo}.png", a.modo)
     print(f"figuras em {pasta}/")
 
 

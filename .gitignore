@@ -6,7 +6,7 @@ __pycache__/
 
 # dados e modelos são recriados pelos scripts
 dados/
-resultados/*/dqn/*/modelo.zip
+resultados/**/modelo.zip
 runs/
 
 .DS_Store

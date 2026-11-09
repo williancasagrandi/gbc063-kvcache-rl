@@ -57,12 +57,12 @@ NOMES = {
 }
 
 
-def avaliar(env, politica, n_episodios: int | None = None, seed: int = 0) -> dict:
-    """Roda a política uma vez em cada trace do env e devolve as médias."""
-    n = n_episodios or len(env.traces)
+def avaliar(env, politica, seed: int = 0) -> dict:
+    """Roda a política uma vez em cada trace do env (e em cada camada, no modo
+    por_camada) e devolve as médias."""
     retornos, perdas, agulhas = [], [], []
-    for i in range(n):
-        obs, info = env.reset(seed=seed if i == 0 else None, options={"trace": i % len(env.traces)})
+    for i, opcoes in enumerate(env.episodios_avaliacao()):
+        obs, info = env.reset(seed=seed if i == 0 else None, options=opcoes)
         G, fim = 0.0, False
         while not fim:
             obs, r, term, trunc, info = env.step(politica(env, obs, info))
@@ -81,7 +81,23 @@ def avaliar(env, politica, n_episodios: int | None = None, seed: int = 0) -> dic
 
 
 def politica_sb3(modelo):
-    """Adapta um modelo do Stable-Baselines3 (ação gulosa, sem exploração)."""
+    """Adapta um modelo do Stable-Baselines3 (ação gulosa, sem exploração).
+
+    Para o DQN chama a rede Q direto (argmax de Q), bem mais rápido que predict()
+    nas avaliações com muitas decisões; o resultado é o mesmo.
+    """
+    q_net = getattr(getattr(modelo, "policy", None), "q_net", None)
+    if q_net is not None:
+        import torch
+
+        dispositivo = modelo.device
+
+        def _pol(env, obs, info):
+            with torch.no_grad():
+                q = q_net(torch.as_tensor(obs, dtype=torch.float32, device=dispositivo).unsqueeze(0))
+            return int(q.argmax(dim=1).item())
+        return _pol
+
     def _pol(env, obs, info):
         a, _ = modelo.predict(obs, deterministic=True)
         return int(a)

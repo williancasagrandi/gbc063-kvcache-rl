@@ -1,9 +1,14 @@
-# Uso:  make tudo                 (GPT-2, recomendado)
-#       make tudo FONTE=sintetico (sem GPU e sem internet)
+# Uso:
+#   make tudo                       um modo (MODO=geral por padrão), GPT-2
+#   make tudo MODO=por_camada       outro modo
+#   make tudo-modos                 os três modos + gráfico comparando (~40 min)
+#   make tudo FONTE=sintetico       sem GPU e sem internet
 FONTE ?= gpt2
+MODO ?= geral
+MODOS = geral grupos por_camada
 PY ?= .venv/bin/python
 
-.PHONY: setup setup-gpt2 teste traces baselines treinar graficos tudo limpar
+.PHONY: setup setup-gpt2 teste traces baselines treinar graficos tudo modos comparar tudo-modos limpar
 
 setup:
 	python3 -m venv .venv
@@ -25,15 +30,29 @@ else
 endif
 
 baselines:
-	$(PY) scripts/avaliar_baselines.py --fonte $(FONTE)
+	$(PY) scripts/avaliar_baselines.py --fonte $(FONTE) --modo $(MODO)
 
 treinar:
-	$(PY) scripts/treinar_dqn.py --fonte $(FONTE)
+	$(PY) scripts/treinar_dqn.py --fonte $(FONTE) --modo $(MODO)
 
 graficos:
-	$(PY) scripts/graficos.py --fonte $(FONTE)
+	$(PY) scripts/graficos.py --fonte $(FONTE) --modo $(MODO)
 
 tudo: traces baselines treinar graficos
+
+# os três modos sobre os mesmos traces, depois o gráfico comparando
+modos:
+	for m in $(MODOS); do \
+		$(PY) scripts/avaliar_baselines.py --fonte $(FONTE) --modo $$m && \
+		$(PY) scripts/treinar_dqn.py --fonte $(FONTE) --modo $$m && \
+		$(PY) scripts/graficos.py --fonte $(FONTE) --modo $$m || exit 1; \
+	done
+	$(PY) scripts/comparar_modos.py --fonte $(FONTE)
+
+comparar:
+	$(PY) scripts/comparar_modos.py --fonte $(FONTE)
+
+tudo-modos: traces modos
 
 limpar:
 	rm -rf dados/$(FONTE) resultados/$(FONTE)

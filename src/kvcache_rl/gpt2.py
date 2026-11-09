@@ -2,8 +2,8 @@
 
 Cada texto recebe uma "agulha" (uma senha) numa posição aleatória do começo
 e uma pergunta sobre ela no final. O modelo lê o texto uma única vez, com o
-cache completo, e a atenção (média sobre camadas e cabeças) é agregada por
-bloco e salva como um Trace.
+cache completo, e a atenção de cada camada (média sobre as cabeças) é agregada
+por bloco e salva como um Trace, junto com a média sobre as camadas.
 
 As funções que dependem de torch/transformers importam essas bibliotecas
 só quando chamadas, para o resto do pacote funcionar sem elas.
@@ -74,22 +74,22 @@ def carregar_modelo(nome: str, dispositivo: str | None = None):
     return tok, modelo.to(dispositivo).eval(), dispositivo
 
 
-def atencao_por_bloco(modelo, ids: list[int], bloco: int, dispositivo: str) -> np.ndarray:
-    """Roda o modelo uma vez e devolve a atenção (T, nb), média de camadas e cabeças."""
+def atencao_por_camada(modelo, ids: list[int], bloco: int, dispositivo: str) -> np.ndarray:
+    """Roda o modelo uma vez e devolve a atenção (L, T, nb): por camada, média das cabeças."""
     import torch
 
+    camadas = []
     with torch.no_grad():
         x = torch.tensor([ids], device=dispositivo)
         out = modelo(x, output_attentions=True)
-        soma = None
         for a in out.attentions:  # (1, cabeças, T, T) por camada
             m = a[0].float().mean(0)
-            soma = m if soma is None else soma + m
-        att = (soma / len(out.attentions)).cpu().numpy()
-    att = att / att.sum(axis=1, keepdims=True)  # garante linhas somando 1
-    return agregar_por_bloco(att, bloco)
+            m = m / m.sum(dim=1, keepdim=True)  # garante linhas somando 1
+            camadas.append(agregar_por_bloco(m.cpu().numpy(), bloco))
+    return np.stack(camadas)
 
 
 def gerar_trace(modelo, seq: Sequencia, bloco: int, dispositivo: str, nome: str) -> Trace:
-    att = atencao_por_bloco(modelo, seq.ids, bloco, dispositivo)
-    return Trace(att=att.astype(np.float32), bloco=bloco, agulha=seq.bloco_agulha, nome=nome)
+    camadas = atencao_por_camada(modelo, seq.ids, bloco, dispositivo)
+    return Trace(att=camadas.mean(axis=0).astype(np.float32), bloco=bloco, agulha=seq.bloco_agulha,
+                 nome=nome, camadas=camadas.astype(np.float16))

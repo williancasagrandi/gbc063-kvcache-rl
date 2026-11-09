@@ -1,14 +1,17 @@
 """Treina o DQN (Stable-Baselines3) no ambiente proxy, com várias sementes.
 
-    python scripts/treinar_dqn.py --fonte gpt2
-    python scripts/treinar_dqn.py --fonte sintetico --sementes 0 1 2
+    python scripts/treinar_dqn.py --fonte gpt2 --modo geral
+    python scripts/treinar_dqn.py --fonte gpt2 --modo grupos
+    python scripts/treinar_dqn.py --fonte gpt2 --modo por_camada
+    python scripts/treinar_dqn.py --fonte sintetico --modo geral --sementes 0 1 2
 
-Treina nos traces de dados/<fonte>/treino e, a cada --freq-avaliacao passos,
-avalia a política gulosa (sem exploração) em todos os traces de teste.
+Hiperparâmetros e parâmetros do ambiente vêm de configs/dqn.yml (uma entrada por modo).
+Treina nos traces de dados/<fonte>/treino e, a cada eval_freq passos, avalia a
+política gulosa (sem exploração) em todos os traces de teste.
 
-Saída em resultados/<fonte>/dqn/seed<N>/:
+Saída em resultados/<fonte>/<modo>/dqn/seed<N>/:
     curva.csv     passos, epsilon, retorno, atenção perdida e agulha no teste
-    final.json    avaliação do modelo final
+    final.json    avaliação do modelo final (= último ponto da curva)
     modelo.zip    rede treinada
     monitor.csv   retorno de cada episódio de treino (com exploração)
 """
@@ -19,13 +22,13 @@ import json
 import time
 from pathlib import Path
 
-import yaml
 from stable_baselines3 import DQN
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
 from kvcache_rl import KVCacheEnv, carregar_pasta
 from kvcache_rl.baselines import avaliar, politica_sb3
+from kvcache_rl.config import CHAVES, carregar_config
 
 CAMPOS = ["passos", "epsilon", "retorno", "retorno_dp", "atencao_perdida", "agulha"]
 
@@ -49,7 +52,8 @@ class AvaliacaoPeriodica(BaseCallback):
             w.writeheader()
             w.writerows(self.linhas)
         print(f"  passo {self.num_timesteps:>7}  eps {linha['epsilon']:.2f}  "
-              f"retorno {r['retorno']:7.2f}  perdida {r['atencao_perdida']:.3f}  agulha {r['agulha']:.2f}")
+              f"retorno {r['retorno']:7.2f}  perdida {r['atencao_perdida']:.3f}  agulha {r['agulha']:.2f}",
+              flush=True)
         return r
 
     def _on_training_start(self):
@@ -65,42 +69,39 @@ class AvaliacaoPeriodica(BaseCallback):
         self.final = self._avaliar()
 
 
-def carregar_config(caminho: str) -> dict:
-    cfg = dict(yaml.safe_load(open(caminho))["KVCache-v0"])
-    cfg["n_timesteps"] = int(float(cfg["n_timesteps"]))
-    return cfg
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--fonte", default="gpt2", help="gpt2 ou sintetico (pasta em dados/)")
+    p.add_argument("--modo", default="geral", choices=list(CHAVES))
     p.add_argument("--config", default="configs/dqn.yml")
     p.add_argument("--sementes", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--passos", type=int, default=None, help="sobrescreve n_timesteps do yml")
-    p.add_argument("--freq-avaliacao", type=int, default=5000)
+    p.add_argument("--freq-avaliacao", type=int, default=None, help="sobrescreve eval_freq do yml")
     a = p.parse_args()
 
-    cfg = carregar_config(a.config)
-    n_passos = a.passos or cfg.pop("n_timesteps")
-    cfg.pop("n_timesteps", None)
-    env_kwargs = cfg.pop("env_kwargs", {})
-    policy = cfg.pop("policy")
+    cfg = carregar_config(a.config, a.modo)
+    n_passos = a.passos or cfg["passos"]
+    freq = a.freq_avaliacao or cfg["eval_freq"]
 
     treino = carregar_pasta(f"dados/{a.fonte}/treino")
     teste = carregar_pasta(f"dados/{a.fonte}/teste")
-    print(f"{len(treino)} traces de treino, {len(teste)} de teste ({a.fonte}); {n_passos} passos por semente")
+    env_treino = KVCacheEnv(treino, **cfg["env"])
+    env_teste = KVCacheEnv(teste, **cfg["env"])
+    for tr in treino + teste:
+        tr.camadas = None  # o ambiente já guardou o que precisa; libera memória
+    print(f"modo {a.modo}: {len(treino)} traces de treino, {len(teste)} de teste ({a.fonte}); "
+          f"{env_teste.decisoes_por_texto} decisões por texto; {n_passos} passos por semente")
 
     for seed in a.sementes:
-        pasta = Path(f"resultados/{a.fonte}/dqn/seed{seed}")
+        pasta = Path(f"resultados/{a.fonte}/{a.modo}/dqn/seed{seed}")
         pasta.mkdir(parents=True, exist_ok=True)
-        print(f"\n== semente {seed} ==")
+        print(f"\n== {a.modo}, semente {seed} ==")
 
-        env = Monitor(KVCacheEnv(treino, **env_kwargs), str(pasta / "monitor.csv"))
-        env_teste = KVCacheEnv(teste, **env_kwargs)
-        modelo = DQN(policy, env, seed=seed, device="cpu", verbose=0, **cfg)
+        env = Monitor(env_treino, str(pasta / "monitor.csv"))
+        modelo = DQN(cfg["policy"], env, seed=seed, device="cpu", verbose=0, **cfg["dqn"])
 
         inicio = time.time()
-        cb = AvaliacaoPeriodica(env_teste, a.freq_avaliacao, n_passos, pasta / "curva.csv")
+        cb = AvaliacaoPeriodica(env_teste, freq, n_passos, pasta / "curva.csv")
         modelo.learn(total_timesteps=n_passos, callback=cb)
         modelo.save(pasta / "modelo")
 

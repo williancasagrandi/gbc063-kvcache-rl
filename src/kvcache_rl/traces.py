@@ -5,12 +5,14 @@ a cada bloco de tokens anteriores, calculada com o cache COMPLETO. O ambiente
 usa isso para simular despejos sem rodar o LLM a cada passo.
 
 Formato (.npz):
-    att    -> float32 (T, nb): att[t, j] = soma da atenção do token t sobre os
-              tokens do bloco j (média sobre camadas e cabeças). Linhas somam ~1
-              e att[t, j] = 0 para j > t // bloco (causal).
-    bloco  -> int, tokens por bloco
-    agulha -> int, índice do bloco com a "agulha" (-1 se não houver)
-    nome   -> str
+    att     -> float32 (T, nb): att[t, j] = soma da atenção do token t sobre os
+               tokens do bloco j, média sobre camadas e cabeças. Linhas somam ~1
+               e att[t, j] = 0 para j > t // bloco (causal).
+    camadas -> float16 (L, T, nb): o mesmo, separado por camada (média sobre as
+               cabeças). Usado pelos modos "grupos" e "por_camada".
+    bloco   -> int, tokens por bloco
+    agulha  -> int, índice do bloco com a "agulha" (-1 se não houver)
+    nome    -> str
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ class Trace:
     bloco: int
     agulha: int = -1
     nome: str = ""
+    camadas: np.ndarray | None = None  # (L, T, nb), float16
 
     @property
     def n_tokens(self) -> int:
@@ -36,15 +39,21 @@ class Trace:
     def n_blocos(self) -> int:
         return self.att.shape[1]
 
+    @property
+    def n_camadas(self) -> int:
+        return 0 if self.camadas is None else self.camadas.shape[0]
+
     def salvar(self, caminho: str | Path) -> None:
         caminho = Path(caminho)
         caminho.parent.mkdir(parents=True, exist_ok=True)
+        extra = {} if self.camadas is None else {"camadas": self.camadas.astype(np.float16)}
         np.savez_compressed(
             caminho,
             att=self.att.astype(np.float32),
             bloco=np.int64(self.bloco),
             agulha=np.int64(self.agulha),
             nome=np.str_(self.nome),
+            **extra,
         )
 
     @staticmethod
@@ -55,6 +64,7 @@ class Trace:
             bloco=int(d["bloco"]),
             agulha=int(d["agulha"]),
             nome=str(d["nome"]),
+            camadas=d["camadas"] if "camadas" in d.files else None,
         )
 
 
@@ -75,57 +85,85 @@ def agregar_por_bloco(att_tokens: np.ndarray, bloco: int) -> np.ndarray:
     return att_tokens.reshape(T, nb, bloco).sum(axis=2)
 
 
+def agrupar_camadas(trace: Trace, grupos: int) -> np.ndarray:
+    """(L, T, nb) -> (grupos, T, nb): média das camadas consecutivas de cada grupo."""
+    if trace.camadas is None:
+        raise ValueError(f"o trace {trace.nome!r} não tem atenção por camada: gere os traces de novo")
+    L = trace.n_camadas
+    if not 1 <= grupos <= L:
+        raise ValueError(f"grupos deve estar entre 1 e {L}")
+    partes = np.array_split(np.arange(L), grupos)
+    return np.stack([trace.camadas[p].astype(np.float32).mean(axis=0) for p in partes])
+
+
 def gerar_sintetico(
     n_blocos: int = 64,
     bloco: int = 16,
     rng: np.random.Generator | None = None,
     com_agulha: bool = True,
     nome: str = "sintetico",
+    n_camadas: int = 12,
 ) -> Trace:
-    """Gera um trace com os padrões que aparecem em LLMs reais.
+    """Gera um trace com os padrões que aparecem em LLMs reais, camada a camada.
 
-    - sink: o primeiro bloco recebe muita atenção o tempo todo;
+    Em todas as camadas:
+    - sink: o primeiro bloco recebe atenção o tempo todo;
     - recência: blocos próximos recebem mais atenção (decaimento exponencial);
-    - heavy hitters: alguns blocos são importantes durante todo o texto;
-    - revisitas: blocos "adormecidos" voltam a ser consultados mais tarde
-      (é isso que quebra heurísticas que só olham o passado recente);
-    - agulha: um bloco do início que só é consultado de novo no final.
+    - heavy hitters comuns: alguns blocos importam durante todo o texto;
+    - agulha: um bloco do início que fica quieto e só é consultado no final.
+
+    Diferenças entre camadas (como nos LLMs, onde cada camada faz uma coisa):
+    - camadas iniciais olham mais para perto; as finais, mais para o sink;
+    - cada família de camadas vizinhas tem seus próprios heavy hitters;
+    - revisitas (blocos que voltam a ser consultados) aparecem só em algumas camadas;
+    - a consulta à agulha no final é forte nas camadas do meio e finais.
     """
     rng = rng or np.random.default_rng()
-    T = n_blocos * bloco
+    nb, L = n_blocos, n_camadas
+    T = nb * bloco
+    idx = np.arange(nb)
+    dist = idx[:, None] - idx[None, :]          # bloco-consulta x bloco-chave
+    visivel = dist >= 0
+    qb_token = np.arange(T) // bloco
 
-    base = np.zeros(n_blocos)
-    hh = rng.choice(np.arange(1, n_blocos), size=max(1, n_blocos // 16), replace=False)
-    base[hh] = rng.uniform(0.6, 1.4, size=hh.size)
+    agulha = int(rng.integers(1, max(2, nb // 5))) if com_agulha else -1
 
-    # revisitas: (bloco alvo, início, duração em blocos, peso)
+    hh_comuns = rng.choice(np.arange(1, nb), size=max(1, nb // 16), replace=False)
+    peso_comum = rng.uniform(0.6, 1.4, size=hh_comuns.size)
+    n_familias = 4
+    hh_familia = [rng.choice(np.arange(1, nb), size=max(1, nb // 16), replace=False) for _ in range(n_familias)]
+    peso_familia = [rng.uniform(1.0, 2.5, size=h.size) for h in hh_familia]
+
+    # revisitas: (bloco alvo, início, duração, peso, primeira camada, última camada + 1)
     revisitas = []
-    for _ in range(n_blocos // 6):
-        alvo = int(rng.integers(1, n_blocos - 4))
-        inicio = int(rng.integers(alvo + 4, n_blocos))
-        revisitas.append((alvo, inicio, int(rng.integers(1, 4)), rng.uniform(1.5, 4.0)))
+    for _ in range(nb // 6):
+        alvo = int(rng.integers(1, nb - 4))
+        inicio = int(rng.integers(alvo + 4, nb))
+        c0 = int(rng.integers(0, L))
+        revisitas.append((alvo, inicio, int(rng.integers(1, 4)), rng.uniform(1.5, 4.0), c0, c0 + int(rng.integers(3, 7))))
 
-    agulha = -1
-    if com_agulha:
-        agulha = int(rng.integers(1, max(2, n_blocos // 5)))
-        base[agulha] = 0.0  # fica quieta até a pergunta
+    camadas = np.zeros((L, T, nb), dtype=np.float64)
+    for c in range(L):
+        frac = c / max(1, L - 1)
+        tau = 0.8 + 3.0 * frac + rng.uniform(-0.3, 0.3)
+        base = np.zeros(nb)
+        base[hh_comuns] += peso_comum
+        familia = min(n_familias - 1, c * n_familias // L)
+        base[hh_familia[familia]] += peso_familia[familia]
+        if agulha >= 0:
+            base[agulha] = 0.0  # fica quieta até a pergunta
 
-    tau = rng.uniform(1.5, 3.5)
-    att = np.zeros((T, n_blocos), dtype=np.float64)
-    idx = np.arange(n_blocos)
-    for t in range(T):
-        qb = t // bloco
-        w = np.zeros(n_blocos)
-        vis = idx <= qb
-        w[vis] = 3.0 * np.exp(-(qb - idx[vis]) / tau) + base[vis]
-        w[0] += 2.5
-        for alvo, ini, dur, peso in revisitas:
-            if ini <= qb < ini + dur:
-                w[alvo] += peso
-        if agulha >= 0 and qb >= n_blocos - 2:
-            w[agulha] += 6.0
-        w[vis] *= rng.gamma(4.0, 0.25, size=vis.sum())
-        w[~vis] = 0.0
-        att[t] = w / w.sum()
+        W = np.where(visivel, 3.0 * np.exp(-np.clip(dist, 0, None) / tau) + base[None, :], 0.0)
+        W[:, 0] += 1.0 + 4.0 * frac
+        for alvo, ini, dur, peso, c0, c1 in revisitas:
+            if c0 <= c < c1:
+                W[ini:ini + dur, alvo] += peso
+        if agulha >= 0:
+            W[nb - 2:, agulha] += 6.0 if frac >= 0.3 else 1.0
 
-    return Trace(att=att.astype(np.float32), bloco=bloco, agulha=agulha, nome=nome)
+        Wt = W[qb_token] * rng.gamma(4.0, 0.25, size=(T, nb))  # ruído; zeros continuam zeros
+        camadas[c] = Wt / Wt.sum(axis=1, keepdims=True)
+
+    att = camadas.mean(axis=0)
+    return Trace(att=att.astype(np.float32), bloco=bloco, agulha=agulha, nome=nome,
+                 camadas=camadas.astype(np.float16))
