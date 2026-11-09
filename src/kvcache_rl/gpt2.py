@@ -2,8 +2,9 @@
 
 Cada texto recebe uma "agulha" (uma senha) numa posição aleatória do começo
 e uma pergunta sobre ela no final. O modelo lê o texto uma única vez, com o
-cache completo, e a atenção de cada camada (média sobre as cabeças) é agregada
-por bloco e salva como um Trace, junto com a média sobre as camadas.
+cache completo, e a atenção de cada cabeça de cada camada é agregada por bloco
+(bloco-consulta x bloco-chave) e salva como um Trace, junto com as médias por
+camada e do modelo todo.
 
 As funções que dependem de torch/transformers importam essas bibliotecas
 só quando chamadas, para o resto do pacote funcionar sem elas.
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .traces import Trace, agregar_por_bloco
+from .traces import Trace
 
 # GPT-2 foi treinado em inglês, então a agulha e a pergunta também são em inglês.
 PREFIXO_AGULHA = " Remember this: the secret code is"
@@ -74,22 +75,27 @@ def carregar_modelo(nome: str, dispositivo: str | None = None):
     return tok, modelo.to(dispositivo).eval(), dispositivo
 
 
-def atencao_por_camada(modelo, ids: list[int], bloco: int, dispositivo: str) -> np.ndarray:
-    """Roda o modelo uma vez e devolve a atenção (L, T, nb): por camada, média das cabeças."""
+def atencao_por_cabeca(modelo, ids: list[int], bloco: int, dispositivo: str) -> np.ndarray:
+    """Roda o modelo uma vez e devolve a atenção por cabeça, agregada por bloco: (L, H, nb, nb)."""
     import torch
 
-    camadas = []
+    cabecas = []
     with torch.no_grad():
         x = torch.tensor([ids], device=dispositivo)
         out = modelo(x, output_attentions=True)
-        for a in out.attentions:  # (1, cabeças, T, T) por camada
-            m = a[0].float().mean(0)
-            m = m / m.sum(dim=1, keepdim=True)  # garante linhas somando 1
-            camadas.append(agregar_por_bloco(m.cpu().numpy(), bloco))
-    return np.stack(camadas)
+        for a in out.attentions:  # (1, H, T, T) por camada
+            m = a[0].float()
+            m = m / m.sum(dim=-1, keepdim=True)  # garante linhas somando 1
+            H, T, _ = m.shape
+            nb = T // bloco
+            # soma sobre os tokens de cada bloco-chave, média sobre os tokens de cada bloco-consulta
+            m = m.reshape(H, nb, bloco, nb, bloco).sum(dim=-1).mean(dim=2)
+            cabecas.append(m.cpu().numpy())
+    return np.stack(cabecas)
 
 
 def gerar_trace(modelo, seq: Sequencia, bloco: int, dispositivo: str, nome: str) -> Trace:
-    camadas = atencao_por_camada(modelo, seq.ids, bloco, dispositivo)
+    cab = atencao_por_cabeca(modelo, seq.ids, bloco, dispositivo)
+    camadas = cab.mean(axis=1)
     return Trace(att=camadas.mean(axis=0).astype(np.float32), bloco=bloco, agulha=seq.bloco_agulha,
-                 nome=nome, camadas=camadas.astype(np.float16))
+                 nome=nome, camadas=camadas.astype(np.float16), cabecas=cab.astype(np.float16))

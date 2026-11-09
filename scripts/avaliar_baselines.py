@@ -2,8 +2,8 @@
 
     python scripts/avaliar_baselines.py --fonte gpt2 --modo geral
 
-No modo por_camada as regras fixas também decidem camada a camada (ex.: o H2O
-usa a atenção de cada camada, como no método original).
+Nos modos por_camada e por_cabeca as regras fixas também decidem por unidade
+(ex.: o H2O usa a atenção de cada cabeça, como no método original).
 
 Saída: resultados/<fonte>/<modo>/baselines.csv
 """

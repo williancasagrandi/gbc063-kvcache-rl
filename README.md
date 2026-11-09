@@ -61,36 +61,42 @@ Extensão prevista: uma ação de "comprimir" (quantizar para 4 bits) em vez de 
 
 Rodar o LLM a cada decisão de treino seria lento demais. Por isso usamos um **ambiente proxy**:
 
-1. O GPT-2 lê cada texto **uma única vez**, com o cache completo, e a atenção de cada token para cada bloco é gravada num *trace*, por camada (média sobre as cabeças) e na média de todas as camadas.
+1. O GPT-2 lê cada texto **uma única vez**, com o cache completo, e a atenção é gravada num *trace*: para cada cabeça de atenção (12 camadas × 12 cabeças), quanto os tokens de cada bloco consultam cada bloco anterior. O trace guarda também as médias por camada e do modelo todo.
 2. O ambiente (`KVCacheEnv`, Gymnasium) simula os despejos a partir do trace: a cada bloco novo, o agente escolhe quem sai e perde a atenção que os próximos tokens dariam aos blocos já apagados.
 3. Cada texto tem uma **agulha** ("the secret code is NNNN") inserida em posição aleatória no primeiro quarto do texto, fora do bloco inicial, e uma pergunta sobre ela no final.
 
-Os textos vêm da WikiText-2, com 1.024 tokens cada (64 blocos de 16, orçamento de 16 blocos por camada): 200 textos de treino e 50 de teste, sem sobreposição. Há também uma fonte **sintética** que imita esses padrões, com 12 camadas que olham para coisas diferentes, e roda sem GPU nem internet.
+Como o agente só decide nas fronteiras de bloco, o trace guarda a atenção **média dos tokens de cada bloco**, e não token a token: a perda e todas as features saem exatamente iguais (há um teste que confere isso contra uma simulação token a token) e o arquivo fica 16 vezes menor.
 
-### Três modos: média geral, grupos de camadas e decisão por camada
+Os textos vêm da WikiText-2, com 1.024 tokens cada (64 blocos de 16, orçamento de 16 blocos por cache): 200 textos de treino e 50 de teste, sem sobreposição. Há também uma fonte **sintética** que imita esses padrões, com 144 cabeças de papéis diferentes (locais, de sink, de blocos importantes, de revisita e poucas "de recuperação" que buscam a agulha), e roda sem GPU nem internet.
 
-O GPT-2 tem 12 camadas, e cada uma presta atenção em coisas diferentes. Testamos três formas de lidar com isso, sempre com **o mesmo orçamento de memória por camada** (16 blocos) e a mesma recompensa (atenção perdida média sobre as camadas, +10 pela agulha), então os retornos são comparáveis:
+### Três modos: geral, por camada e por cabeça
 
-| Modo | Cache | Estado (por candidato) | Decisões por texto | Entradas da rede |
+Cada camada e cada cabeça do GPT-2 presta atenção em coisas diferentes, e no GPT-2 cada cabeça tem o seu próprio K e V, ou seja, o seu próprio pedaço do cache. Testamos três granularidades, sempre com **o mesmo orçamento (16 blocos) em cada cache**:
+
+| Modo | Caches | O agente vê, por candidato | Episódio | Entradas da rede |
 |---|---|---|---|---|
-| `geral` | um, igual para todas as camadas | idade, sink, posição + atenção acumulada e recente **na média das 12 camadas** | 47 | 86 |
-| `grupos` | um, igual para todas as camadas | idade, sink, posição + atenção acumulada e recente **de cada grupo** (camadas 1–4, 5–8, 9–12) | 47 | 154 |
-| `por_camada` | **um por camada** | idade, sink, posição + atenção acumulada e recente **daquela camada**; o estado diz qual camada é | 47 por camada (564 no texto todo) | 98 |
+| `geral` | 1, igual para o modelo todo | idade, sink, posição, atenção acumulada e recente **na média do modelo** | um texto | 86 |
+| `por_camada` | 12, um por camada | o mesmo, com a atenção **daquela camada** + qual camada é | um texto em uma camada | 98 |
+| `por_cabeca` | 144, um por cabeça | o mesmo, com a atenção **daquela cabeça** + qual cabeça é | um texto em uma cabeça | 230 |
 
-No modo `por_camada`, cada episódio é um texto visto por **uma** camada, com a perda e a agulha daquela camada, e o mesmo agente serve para as 12 camadas (parâmetros compartilhados). As camadas ficam em episódios separados porque os caches delas não interagem: se as 12 decidissem em sequência no mesmo episódio, o "próximo estado" de uma decisão seria o cache de outra camada, que o agente não vê, e a propriedade de Markov se perderia. Para avaliar um texto, rodamos as 12 camadas e tiramos a média; a agulha conta pela fração de camadas que a mantiveram. As regras fixas também passam a decidir camada a camada (o H2O usa a atenção de cada camada, como no método original).
+Nos modos por camada e por cabeça, **o mesmo agente serve para todas as unidades** (parâmetros compartilhados) e cada unidade é um episódio separado. Os caches das unidades não interagem: se elas decidissem em sequência no mesmo episódio, o "próximo estado" de uma decisão seria o cache de outra unidade, que o agente não vê, e a propriedade de Markov se perderia. Para avaliar um texto, rodamos todas as unidades e tiramos a média. As regras fixas também passam a decidir por unidade (o H2O por cabeça é o método original).
+
+**A agulha só importa para quem a consulta.** Poucas cabeças buscam informação distante no contexto (as *retrieval heads*). Por isso, em cada unidade, o bônus da agulha é `10 ×` a relevância dela: a atenção que a pergunta final dá à agulha naquela unidade, dividida pela da unidade que mais a consulta. A métrica "agulha mantida" de um texto é a fração dessa atenção que foi preservada: no modo geral é 0 ou 1; por camada e por cabeça, a média ponderada das unidades. Assim, **atenção perdida e agulha mantida são comparáveis entre os modos**. O retorno não é, porque a escala do bônus muda, então ele só é comparado dentro de cada modo.
 
 ### DQN
 
-Stable-Baselines3 com `MlpPolicy` (rede 128×128): uma saída Q(s, a) para cada um dos 17 candidatos. Hiperparâmetros em [`configs/dqn.yml`](configs/dqn.yml), no mesmo formato do `dqn.yml` da atividade de Atari, com uma entrada por modo:
+Stable-Baselines3 com `MlpPolicy`: uma saída Q(s, a) para cada um dos 17 candidatos. Hiperparâmetros em [`configs/dqn.yml`](configs/dqn.yml), no mesmo formato do `dqn.yml` da atividade de Atari, com uma entrada por modo:
 
-| Parâmetro | `geral` e `grupos` | `por_camada` | Por quê |
-|---|---|---|---|
-| `n_timesteps` | 200.000 | 300.000 | ~4.250 episódios; por camada, ~6.400 (≈530 textos × 12 camadas) |
-| `learning_starts` | 5.000 | 5.000 | episódios curtos; não precisa de 100 mil passos aleatórios |
-| `exploration_fraction` | 0,3 (ε de 1,0 a 0,05) | 0,3 | explorar mais para descobrir o prêmio da agulha |
-| `buffer_size`, `learning_rate`, `train_freq`, `target_update_interval` | 100k, 1e-4, 4, 1.000 | iguais | como no Atari |
+| Parâmetro | `geral` | `por_camada` | `por_cabeca` | Por quê |
+|---|---|---|---|---|
+| `n_timesteps` | 200.000 | 300.000 | 500.000 | ~4.250, ~6.400 e ~10.600 episódios de 47 decisões |
+| `policy_kwargs.net_arch` | 128×128 | 128×128 | 256×256 | por cabeça o agente aprende o papel de 144 unidades |
+| `learning_starts` | 5.000 | 5.000 | 5.000 | episódios curtos; não precisa de 100 mil passos aleatórios |
+| `exploration_fraction` | 0,3 | 0,3 | 0,3 | ε de 1,0 a 0,05; explorar mais para achar o prêmio da agulha |
+| `buffer_size` | 100k | 100k | 200k | |
+| `learning_rate`, `train_freq`, `target_update_interval` | 1e-4, 4, 1.000 | iguais | iguais | como no Atari |
 
-A política gulosa (sem exploração) é avaliada nos 50 textos de teste a cada 5.000 passos (10.000 no modo por camada, onde cada avaliação roda as 12 camadas). Treinamos com 3 sementes.
+A política gulosa (sem exploração) é avaliada nos 50 textos de teste, em todas as unidades, a cada 5.000 / 10.000 / 25.000 passos. Treinamos com 3 sementes.
 
 ### Como rodar
 
@@ -99,23 +105,22 @@ Requer Python 3.10+ (no Debian/Ubuntu: `sudo apt install python3-venv`).
 ```bash
 make setup-gpt2      # cria .venv e instala tudo (PyTorch, SB3, transformers)
 make teste           # testes do ambiente
-make tudo            # traces do GPT-2 -> baselines -> DQN no modo geral (3 sementes) -> gráficos
-make modos           # os três modos sobre os mesmos traces + gráfico comparando (~40 min)
+make tudo-modos      # traces do GPT-2 -> os três modos (baselines, DQN, gráficos) -> comparação
 ```
 
-Um modo só: `make tudo MODO=grupos` (ou `make baselines treinar graficos MODO=por_camada` sem regerar os traces). Sem GPU ou sem internet: `make setup && make tudo-modos FONTE=sintetico`.
+Um modo só: `make tudo MODO=por_cabeca` (ou `make baselines treinar graficos MODO=por_camada` sem regerar os traces). Sem GPU ou sem internet: `make setup && make tudo-modos FONTE=sintetico`.
 
 Etapa por etapa:
 
 ```bash
-.venv/bin/python scripts/gerar_traces_gpt2.py                          # dados/gpt2/{treino,teste}
-.venv/bin/python scripts/avaliar_baselines.py --fonte gpt2 --modo geral
-.venv/bin/python scripts/treinar_dqn.py --fonte gpt2 --modo geral       # resultados/gpt2/geral/dqn/seed{0,1,2}
-.venv/bin/python scripts/graficos.py --fonte gpt2 --modo geral          # resultados/gpt2/geral/figuras
-.venv/bin/python scripts/comparar_modos.py --fonte gpt2                 # depois de rodar os três modos
+.venv/bin/python scripts/gerar_traces_gpt2.py                              # dados/gpt2/{treino,teste}
+.venv/bin/python scripts/avaliar_baselines.py --fonte gpt2 --modo por_cabeca
+.venv/bin/python scripts/treinar_dqn.py --fonte gpt2 --modo por_cabeca      # resultados/gpt2/por_cabeca/dqn/seed{0,1,2}
+.venv/bin/python scripts/graficos.py --fonte gpt2 --modo por_cabeca         # resultados/gpt2/por_cabeca/figuras
+.venv/bin/python scripts/comparar_modos.py --fonte gpt2                     # depois de rodar os três modos
 ```
 
-Tempo aproximado num notebook (CPU): traces do GPT-2 de 2 a 10 min; DQN cerca de 3 min por semente nos modos `geral` e `grupos` e 7 min por semente no `por_camada`. O `make modos` inteiro leva uns 40 min.
+Tempo aproximado num notebook (CPU): traces do GPT-2 de 2 a 10 min; DQN por semente cerca de 2,5 min no `geral`, 4 min no `por_camada` e 12 min no `por_cabeca`. O `make tudo-modos` inteiro leva cerca de 1 hora.
 
 ### Saídas
 
@@ -134,9 +139,9 @@ Tempo aproximado num notebook (CPU): traces do GPT-2 de 2 a 10 min; DQN cerca de
 configs/dqn.yml                  hiperparâmetros do DQN, um bloco por modo
 src/kvcache_rl/
   env.py                         ambiente Gymnasium (KVCacheEnv) com os três modos
-  traces.py                      formato dos traces (média e por camada) e gerador sintético
-  gpt2.py                        gravação da atenção do GPT-2 por camada e inserção da agulha
-  baselines.py                   janela deslizante, StreamingLLM, H2O, aleatória, oráculo
+  traces.py                      formato dos traces (por bloco; modelo, camada e cabeça) e gerador sintético
+  gpt2.py                        gravação da atenção do GPT-2 por cabeça e inserção da agulha
+  baselines.py                   janela deslizante, StreamingLLM, H2O, aleatória, oráculo e avaliação
   config.py, visual.py           leitura do dqn.yml e estilo dos gráficos
 scripts/                         gerar traces, avaliar, treinar, gráficos, comparar modos
 tests/                           testes do ambiente
@@ -153,6 +158,9 @@ tests/                           testes do ambiente
 - Zhang et al. *H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models*. NeurIPS 2023. [arXiv:2306.14048](https://arxiv.org/abs/2306.14048)
 - Li et al. *SnapKV: LLM Knows What You are Looking for Before Generation*. 2024. [arXiv:2404.14469](https://arxiv.org/abs/2404.14469)
 - Kwon et al. *Efficient Memory Management for Large Language Model Serving with PagedAttention* (vLLM). SOSP 2023. [arXiv:2309.06180](https://arxiv.org/abs/2309.06180)
+- Wu et al. *Retrieval Head Mechanistically Explains Long-Context Factuality*. 2024. [arXiv:2404.15574](https://arxiv.org/abs/2404.15574)
+- Xiao et al. *DuoAttention: Efficient Long-Context LLM Inference with Retrieval and Streaming Heads*. 2024. [arXiv:2410.10819](https://arxiv.org/abs/2410.10819)
+- Fu et al. *Not All Heads Matter: A Head-Level KV Cache Compression Method with Integrated Retrieval and Reasoning* (HeadKV). 2024. [arXiv:2410.19258](https://arxiv.org/abs/2410.19258)
 - Mnih et al. *Human-level control through deep reinforcement learning* (DQN). Nature, 2015.
 - Merity et al. *Pointer Sentinel Mixture Models* (WikiText). 2016. [arXiv:1609.07843](https://arxiv.org/abs/1609.07843)
 - Sutton & Barto. *Reinforcement Learning: An Introduction*, 2ª ed., 2018.

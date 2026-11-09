@@ -1,4 +1,4 @@
-"""Compara os três modos (geral, grupos, por_camada) num gráfico e numa tabela.
+"""Compara os três modos (geral, por_camada, por_cabeca) num gráfico e numa tabela.
 
     python scripts/comparar_modos.py --fonte gpt2
 
@@ -84,8 +84,8 @@ def grafico(linhas: list[dict], t: dict, saida: Path, fonte: str):
         ax.set_title(titulo, color=t["texto"], fontsize=13, loc="left", pad=12)
 
     eixos[0].set_yticks(centros)
-    eixos[0].set_yticklabels([NOMES_MODOS[l["modo"]].replace(" (", "\n(").replace(" de camadas", "\nde camadas")
-                              for l in linhas], fontsize=12, color=t["texto"])
+    eixos[0].set_yticklabels([NOMES_MODOS[l["modo"]].replace(" (", "\n(") for l in linhas],
+                             fontsize=12, color=t["texto"])
 
     # legenda (3 séries): quadrados na mesma cor das barras
     from matplotlib.patches import Patch
@@ -96,8 +96,8 @@ def grafico(linhas: list[dict], t: dict, saida: Path, fonte: str):
                      fontsize=11, labelcolor=t["secundario"], handlelength=1.2, columnspacing=2.0)
     for h in leg.legend_handles:
         h.set_height(9)
-    fig.text(0.2, 0.95, f"Mesmo orçamento de memória por camada nos três modos · textos de teste {FONTES.get(fonte, fonte)}"
-             " · no modo por camada, agulha = fração das camadas que a mantiveram",
+    fig.text(0.2, 0.95, f"Mesmo orçamento (16 blocos) em cada cache · textos de teste {FONTES.get(fonte, fonte)}"
+             " · agulha: fração da atenção que a pergunta dá a ela que foi preservada",
              color=t["secundario"], fontsize=10.5)
     fig.subplots_adjust(left=0.2, right=0.97, top=0.86, bottom=0.14, wspace=0.12)
     fig.savefig(saida, facecolor=t["fundo"])

@@ -2,47 +2,79 @@ import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env
 
-from kvcache_rl import MODOS, KVCacheEnv, agrupar_camadas, gerar_sintetico
+from kvcache_rl import MODOS, KVCacheEnv, Trace, agregar_blocos, gerar_sintetico
 from kvcache_rl.baselines import BASELINES, avaliar
-
-CONFIGS = [("geral", 1), ("grupos", 3), ("por_camada", 3), ("por_camada", 12)]
 
 
 @pytest.fixture(scope="module")
 def traces():
     rng = np.random.default_rng(123)
-    return [gerar_sintetico(40, 8, rng=rng, nome=f"t{i}") for i in range(6)]
+    return [gerar_sintetico(40, 8, rng=rng, nome=f"t{i}", n_camadas=6, n_cabecas=4) for i in range(6)]
 
 
 def test_trace_causal_e_normalizado(traces):
     tr = traces[0]
-    assert np.allclose(tr.att.sum(axis=1), 1.0, atol=1e-4)
-    for t in range(tr.n_tokens):
-        assert np.all(tr.att[t, t // tr.bloco + 1:] == 0)
+    for m in (tr.att, tr.camadas.astype(np.float32), tr.cabecas.astype(np.float32)):
+        assert np.allclose(m.sum(axis=-1), 1.0, atol=2e-2)
+        assert np.all(np.triu(m, k=1) == 0)
 
 
-def test_camadas_somam_um_e_media_bate(traces):
+def test_medias_batem(traces):
     tr = traces[0]
-    assert tr.camadas.shape == (12, tr.n_tokens, tr.n_blocos)
-    assert np.allclose(tr.camadas.astype(np.float32).sum(axis=2), 1.0, atol=2e-2)
-    assert np.allclose(tr.camadas.astype(np.float32).mean(axis=0), tr.att, atol=1e-3)
-    assert np.allclose(agrupar_camadas(tr, 1)[0], tr.att, atol=1e-3)
+    cab = tr.cabecas.astype(np.float32)
+    assert np.allclose(cab.mean(axis=1), tr.camadas.astype(np.float32), atol=2e-3)
+    assert np.allclose(tr.camadas.astype(np.float32).mean(axis=0), tr.att, atol=2e-3)
 
 
-def test_camadas_sao_diferentes(traces):
-    """Cada camada precisa olhar para coisas diferentes, senão por_camada não faz sentido."""
-    c = traces[0].camadas.astype(np.float32)
-    assert np.abs(c[0] - c[-1]).mean() > 0.005
+def test_cabecas_sao_diferentes(traces):
+    cab = traces[0].cabecas.astype(np.float32).reshape(-1, 40, 40)
+    assert np.abs(cab[0] - cab[-1]).mean() > 0.005
 
 
-@pytest.mark.parametrize("modo,grupos", CONFIGS)
-def test_check_env(traces, modo, grupos):
-    check_env(KVCacheEnv(traces, orcamento=8, modo=modo, grupos=grupos), skip_render_check=True)
+def test_agregar_blocos():
+    rng = np.random.default_rng(0)
+    T, bs = 32, 4
+    a = np.tril(rng.random((T, T)))
+    a /= a.sum(axis=1, keepdims=True)
+    b = agregar_blocos(a, bs)
+    assert b.shape == (8, 8)
+    assert np.allclose(b.sum(axis=1), 1.0)
+    assert np.all(np.triu(b, k=1) == 0)
 
 
-@pytest.mark.parametrize("modo,grupos", CONFIGS)
-def test_cache_nunca_estoura_e_tamanho_do_episodio(traces, modo, grupos):
-    env = KVCacheEnv(traces, orcamento=8, modo=modo, grupos=grupos)
+def test_ambiente_por_bloco_igual_a_simulacao_por_token():
+    """A perda do ambiente (por bloco) tem que ser igual à calculada token a token."""
+    rng = np.random.default_rng(7)
+    nb, bs, B = 24, 4, 6
+    T = nb * bs
+    a = np.tril(rng.random((T, T)) ** 3)
+    a /= a.sum(axis=1, keepdims=True)
+    tr = Trace(att=agregar_blocos(a, bs).astype(np.float32), bloco=bs, agulha=-1)
+    env = KVCacheEnv([tr], orcamento=B)
+    env.reset(options={"trace": 0, "unidade": 0})
+
+    cache, despejados, perdas = list(range(B + 1)), set(), []
+    fim, passo, k = False, 0, B
+    while not fim:
+        acao = passo % (B + 1)
+        despejados.add(cache.pop(acao))
+        k += 1
+        cache.append(k)
+        tokens_desp = [s for j in despejados for s in range(j * bs, (j + 1) * bs)]
+        perdas.append(np.mean([a[t, tokens_desp].sum() for t in range(k * bs, (k + 1) * bs)]))
+        _, _, fim, _, info = env.step(acao)
+        passo += 1
+    assert info["atencao_perdida_media"] == pytest.approx(np.mean(perdas), abs=1e-5)
+
+
+@pytest.mark.parametrize("modo", MODOS)
+def test_check_env(traces, modo):
+    check_env(KVCacheEnv(traces, orcamento=8, modo=modo), skip_render_check=True)
+
+
+@pytest.mark.parametrize("modo", MODOS)
+def test_cache_nunca_estoura_e_tamanho_do_episodio(traces, modo):
+    env = KVCacheEnv(traces, orcamento=8, modo=modo)
     env.reset(seed=0)
     passos, fim = 0, False
     while not fim:
@@ -55,7 +87,7 @@ def test_cache_nunca_estoura_e_tamanho_do_episodio(traces, modo, grupos):
 
 
 def test_candidatos_ordenados(traces):
-    env = KVCacheEnv(traces, orcamento=8, modo="por_camada", grupos=3)
+    env = KVCacheEnv(traces, orcamento=8, modo="por_cabeca")
     _, info = env.reset(seed=1)
     for _ in range(9):
         assert np.all(np.diff(info["candidatos"]) > 0)
@@ -63,51 +95,44 @@ def test_candidatos_ordenados(traces):
         _, _, _, _, info = env.step(3)
 
 
-def test_por_camada_episodio_e_uma_camada(traces):
-    env = KVCacheEnv(traces, orcamento=8, modo="por_camada", grupos=12)
-    obs, info = env.reset(options={"trace": 2, "camada": 7})
-    assert info["camada"] == 7 and obs[-12:].argmax() == 7 and obs[-12:].sum() == 1
-    assert len(env.episodios_avaliacao()) == len(traces) * 12
-    assert env.decisoes_por_texto == (env.nb - 1 - env.B) * 12
+def test_unidades(traces):
+    camada = KVCacheEnv(traces, orcamento=8, modo="por_camada")
+    cabeca = KVCacheEnv(traces, orcamento=8, modo="por_cabeca")
+    assert (camada.U, cabeca.U) == (6, 24)
+    obs, info = cabeca.reset(options={"trace": 2, "unidade": 13})
+    assert info["unidade"] == 13 and obs[-24:].argmax() == 13 and obs[-24:].sum() == 1
+    assert cabeca.nome_unidade(13) == "camada 3, cabeça 1"
+    assert len(cabeca.episodios_avaliacao()) == len(traces) * 24
+
+
+@pytest.mark.parametrize("modo", MODOS)
+def test_pesos_da_agulha(traces, modo):
+    env = KVCacheEnv(traces, orcamento=8, modo=modo)
+    for rel, peso in zip(env._relevancia, env._peso):
+        assert rel.max() == pytest.approx(1.0) and peso.sum() == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("modo", MODOS)
 @pytest.mark.parametrize("nome", list(BASELINES))
 def test_baselines_rodam(traces, modo, nome):
-    env = KVCacheEnv(traces, orcamento=8, modo=modo, grupos=3)
-    r = avaliar(env, BASELINES[nome])
+    r = avaliar(KVCacheEnv(traces, orcamento=8, modo=modo), BASELINES[nome])
     assert 0.0 <= r["atencao_perdida"] <= 1.0
+    assert 0.0 <= r["agulha"] <= 1.0
 
 
-@pytest.mark.parametrize("nome", ["janela_deslizante", "streaming_llm", "h2o"])
-def test_grupos_nao_muda_as_regras_fixas(traces, nome):
-    """No modo grupos o cache é um só: as regras fixas decidem igual ao modo geral."""
-    geral = avaliar(KVCacheEnv(traces, orcamento=8, modo="geral"), BASELINES[nome])
-    grupos = avaliar(KVCacheEnv(traces, orcamento=8, modo="grupos", grupos=3), BASELINES[nome])
-    assert grupos["atencao_perdida"] == pytest.approx(geral["atencao_perdida"], abs=2e-3)
-    assert grupos["agulha"] == geral["agulha"]
+def test_decidir_mais_fino_perde_menos(traces):
+    """Com a atenção de cada unidade, o H2O perde menos: cabeça < camada < geral."""
+    perda = {m: avaliar(KVCacheEnv(traces, orcamento=8, modo=m), BASELINES["h2o"])["atencao_perdida"] for m in MODOS}
+    assert perda["por_cabeca"] < perda["por_camada"] < perda["geral"]
 
 
-def test_por_camada_com_um_grupo_equivale_ao_geral(traces):
-    geral = avaliar(KVCacheEnv(traces, orcamento=8, modo="geral"), BASELINES["h2o"])
-    um = avaliar(KVCacheEnv(traces, orcamento=8, modo="por_camada", grupos=1), BASELINES["h2o"])
-    assert um["atencao_perdida"] == pytest.approx(geral["atencao_perdida"], abs=2e-3)
-
-
-def test_h2o_por_camada_perde_menos_que_h2o_geral(traces):
-    """Decidir por camada usa a atenção de cada uma: o H2O deve perder menos."""
-    geral = avaliar(KVCacheEnv(traces, orcamento=8, modo="geral"), BASELINES["h2o"])
-    camada = avaliar(KVCacheEnv(traces, orcamento=8, modo="por_camada", grupos=12), BASELINES["h2o"])
-    assert camada["atencao_perdida"] < geral["atencao_perdida"]
-
-
-@pytest.mark.parametrize("modo,grupos", CONFIGS)
-def test_oraculo_e_limite_superior(traces, modo, grupos):
-    env = KVCacheEnv(traces, orcamento=8, modo=modo, grupos=grupos)
+@pytest.mark.parametrize("modo", MODOS)
+def test_oraculo_e_limite_superior(traces, modo):
+    env = KVCacheEnv(traces, orcamento=8, modo=modo)
     perdas = {n: avaliar(env, BASELINES[n])["atencao_perdida"] for n in ("oraculo", "janela_deslizante", "aleatoria")}
     assert perdas["oraculo"] <= perdas["janela_deslizante"]
     assert perdas["oraculo"] <= perdas["aleatoria"]
-    assert avaliar(env, BASELINES["oraculo"])["agulha"] == 1.0
+    assert avaliar(env, BASELINES["oraculo"])["agulha"] == pytest.approx(1.0)
 
 
 def test_agulha_gpt2_fora_do_sink_e_no_bloco_certo():

@@ -1,7 +1,7 @@
 """Gera os gráficos de um modo para os slides.
 
     python scripts/graficos.py --fonte gpt2 --modo geral
-    python scripts/graficos.py --fonte gpt2 --modo por_camada --tema claro
+    python scripts/graficos.py --fonte gpt2 --modo por_cabeca --tema claro
 
 Lê resultados/<fonte>/<modo>/baselines.csv e resultados/<fonte>/<modo>/dqn/seed*/
 e salva em resultados/<fonte>/<modo>/figuras/:
@@ -132,8 +132,8 @@ def comparacao_final(baselines, finais, t, saida: Path, modo: str):
         rot.set_color(t["destaque"] if l[0] == "dqn" else t["texto"])
         rot.set_fontweight("bold" if l[0] == "dqn" else "normal")
     nota = f"{NOMES_MODOS[modo]} · DQN: média de {len(finais)} sementes, traço = mín–máx · Oráculo (tracejado): limite superior"
-    if modo == "por_camada":
-        nota += " · agulha = fração das camadas que a mantiveram"
+    if modo != "geral":
+        nota += " · agulha ponderada pela atenção que cada unidade dá a ela"
     fig.text(0.16, 0.03, nota, color=t["secundario"], fontsize=10.5)
     fig.subplots_adjust(left=0.16, right=0.97, top=0.88, bottom=0.12, wspace=0.12)
     fig.savefig(saida, facecolor=t["fundo"])

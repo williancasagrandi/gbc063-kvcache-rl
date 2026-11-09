@@ -58,11 +58,17 @@ NOMES = {
 
 
 def avaliar(env, politica, seed: int = 0) -> dict:
-    """Roda a política uma vez em cada trace do env (e em cada camada, no modo
-    por_camada) e devolve as médias."""
-    retornos, perdas, agulhas = [], [], []
-    for i, opcoes in enumerate(env.episodios_avaliacao()):
-        obs, info = env.reset(seed=seed if i == 0 else None, options=opcoes)
+    """Roda a política uma vez em cada trace do env, em cada unidade (o modelo todo,
+    cada camada ou cada cabeça, conforme o modo), e devolve as médias.
+
+    atenção perdida: média sobre todas as unidades e textos.
+    agulha: por texto, a fração da atenção que a pergunta dá à agulha que foi
+    preservada (unidades ponderadas pelo quanto consultam a agulha); média nos textos.
+    """
+    retornos, perdas = [], []
+    agulha_texto: dict[int, float] = {}
+    for n, opcoes in enumerate(env.episodios_avaliacao()):
+        obs, info = env.reset(seed=seed if n == 0 else None, options=opcoes)
         G, fim = 0.0, False
         while not fim:
             obs, r, term, trunc, info = env.step(politica(env, obs, info))
@@ -70,13 +76,55 @@ def avaliar(env, politica, seed: int = 0) -> dict:
             fim = term or trunc
         retornos.append(G)
         perdas.append(info["atencao_perdida_media"])
-        if info.get("agulha_mantida") is not None:
-            agulhas.append(float(info["agulha_mantida"]))
+        if "agulha_mantida" in info:
+            i = opcoes["trace"]
+            agulha_texto[i] = agulha_texto.get(i, 0.0) + info["peso_agulha"] * info["agulha_mantida"]
     return {
         "retorno": float(np.mean(retornos)),
         "retorno_dp": float(np.std(retornos)),
         "atencao_perdida": float(np.mean(perdas)),
-        "agulha": float(np.mean(agulhas)) if agulhas else float("nan"),
+        "agulha": float(np.mean(list(agulha_texto.values()))) if agulha_texto else float("nan"),
+    }
+
+
+def avaliar_dqn(env, modelo, lote: int = 512) -> dict:
+    """Mesmo resultado de avaliar(env, politica_sb3(modelo)), mas roda até `lote`
+    episódios em paralelo e chama a rede Q uma vez por passo para todos eles.
+    Faz diferença no modo por_cabeca (7.200 episódios por avaliação)."""
+    import copy
+
+    import torch
+
+    q_net, dispositivo = modelo.policy.q_net, modelo.device
+    episodios = env.episodios_avaliacao()
+    retornos, perdas = [], []
+    agulha_texto: dict[int, float] = {}
+    pool = [copy.copy(env) for _ in range(min(lote, len(episodios)))]
+    for ini in range(0, len(episodios), lote):
+        bloco_ep = episodios[ini:ini + lote]
+        envs = pool[:len(bloco_ep)]
+        obs = np.stack([e.reset(options=o)[0] for e, o in zip(envs, bloco_ep)])
+        G = np.zeros(len(envs))
+        ativo = np.ones(len(envs), dtype=bool)
+        while ativo.any():
+            with torch.no_grad():
+                q = q_net(torch.as_tensor(obs, dtype=torch.float32, device=dispositivo))
+            acoes = q.argmax(dim=1).cpu().numpy()
+            for n in np.flatnonzero(ativo):
+                o, r, term, trunc, info = envs[n].step(int(acoes[n]))
+                obs[n], G[n] = o, G[n] + r
+                if term or trunc:
+                    ativo[n] = False
+                    perdas.append(info["atencao_perdida_media"])
+                    if "agulha_mantida" in info:
+                        i = bloco_ep[n]["trace"]
+                        agulha_texto[i] = agulha_texto.get(i, 0.0) + info["peso_agulha"] * info["agulha_mantida"]
+        retornos.extend(G.tolist())
+    return {
+        "retorno": float(np.mean(retornos)),
+        "retorno_dp": float(np.std(retornos)),
+        "atencao_perdida": float(np.mean(perdas)),
+        "agulha": float(np.mean(list(agulha_texto.values()))) if agulha_texto else float("nan"),
     }
 
 

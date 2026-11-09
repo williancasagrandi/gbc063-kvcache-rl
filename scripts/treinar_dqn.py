@@ -1,8 +1,8 @@
 """Treina o DQN (Stable-Baselines3) no ambiente proxy, com várias sementes.
 
     python scripts/treinar_dqn.py --fonte gpt2 --modo geral
-    python scripts/treinar_dqn.py --fonte gpt2 --modo grupos
     python scripts/treinar_dqn.py --fonte gpt2 --modo por_camada
+    python scripts/treinar_dqn.py --fonte gpt2 --modo por_cabeca
     python scripts/treinar_dqn.py --fonte sintetico --modo geral --sementes 0 1 2
 
 Hiperparâmetros e parâmetros do ambiente vêm de configs/dqn.yml (uma entrada por modo).
@@ -27,7 +27,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
 from kvcache_rl import KVCacheEnv, carregar_pasta
-from kvcache_rl.baselines import avaliar, politica_sb3
+from kvcache_rl.baselines import avaliar_dqn
 from kvcache_rl.config import CHAVES, carregar_config
 
 CAMPOS = ["passos", "epsilon", "retorno", "retorno_dp", "atencao_perdida", "agulha"]
@@ -43,7 +43,7 @@ class AvaliacaoPeriodica(BaseCallback):
         self.final = None
 
     def _avaliar(self):
-        r = avaliar(self.env_teste, politica_sb3(self.model))
+        r = avaliar_dqn(self.env_teste, self.model)
         eps = self.model.exploration_rate if self.num_timesteps > 0 else self.model.exploration_initial_eps
         linha = {"passos": self.num_timesteps, "epsilon": eps, **r}
         self.linhas.append(linha)
@@ -87,10 +87,8 @@ def main():
     teste = carregar_pasta(f"dados/{a.fonte}/teste")
     env_treino = KVCacheEnv(treino, **cfg["env"])
     env_teste = KVCacheEnv(teste, **cfg["env"])
-    for tr in treino + teste:
-        tr.camadas = None  # o ambiente já guardou o que precisa; libera memória
     print(f"modo {a.modo}: {len(treino)} traces de treino, {len(teste)} de teste ({a.fonte}); "
-          f"{env_teste.decisoes_por_texto} decisões por texto; {n_passos} passos por semente")
+          f"{env_teste.U} unidade(s) por texto; {n_passos} passos por semente")
 
     for seed in a.sementes:
         pasta = Path(f"resultados/{a.fonte}/{a.modo}/dqn/seed{seed}")

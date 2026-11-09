@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import yaml
 
-CHAVES = {"geral": "KVCache-v0", "grupos": "KVCacheGrupos-v0", "por_camada": "KVCachePorCamada-v0"}
+CHAVES = {"geral": "KVCache-v0", "por_camada": "KVCachePorCamada-v0", "por_cabeca": "KVCachePorCabeca-v0"}
 NOMES_MODOS = {
-    "geral": "Geral (média das camadas)",
-    "grupos": "Features por grupo de camadas",
+    "geral": "Geral (média do modelo)",
     "por_camada": "Decisão por camada",
+    "por_cabeca": "Decisão por cabeça",
 }
 
 

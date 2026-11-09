@@ -43,6 +43,11 @@ def estilo(ax, t):
     ax.tick_params(colors=t["secundario"], labelsize=11, length=0)
     ax.grid(axis="y", color=t["grade"], linewidth=0.8)
     ax.set_axisbelow(True)
+    from matplotlib.ticker import FuncFormatter
+
+    formato = FuncFormatter(lambda v, _: f"{v:g}".replace(".", ",").replace("-", "\u2212"))
+    ax.xaxis.set_major_formatter(formato)
+    ax.yaxis.set_major_formatter(formato)
 
 
 def ler_csv(caminho: Path) -> list[dict]:

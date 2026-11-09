@@ -5,35 +5,36 @@ Dinâmica de um episódio:
   2. Cada novo bloco é processado (seus tokens consultam o cache + ele mesmo).
      Ao final do bloco, o cache tem orcamento + 1 blocos e o agente escolhe
      um para despejar. Despejado, o bloco nunca mais volta.
-  3. A recompensa é menos a massa média de atenção que os tokens do próximo
-     bloco dariam aos blocos já despejados (atenção "perdida").
-  4. No fim do texto, soma-se `bonus_agulha` se a agulha ainda está no cache.
+  3. A recompensa é menos a atenção média que os tokens do próximo bloco dariam
+     aos blocos já despejados (atenção "perdida").
+  4. No fim do texto, ganha um bônus se a agulha ainda está no cache.
 
-Três modos, sempre com o mesmo orçamento de memória por camada:
+Três modos, sempre com o mesmo orçamento (16 blocos) em cada cache:
 
-  geral       um cache para todas as camadas; o estado usa a atenção média
-              de todas as camadas. Episódio = um texto.
-  grupos      um cache para todas as camadas, mas o estado separa a atenção
-              por grupos de camadas consecutivas (ex.: iniciais, meio, finais).
-              Episódio = um texto.
-  por_camada  cada grupo de camadas tem o seu próprio cache (com grupos = nº de
-              camadas, um cache por camada). Episódio = um texto visto por UMA
-              camada, com a perda e a agulha daquela camada; o estado diz qual
-              camada é. O mesmo agente serve para todas as camadas (parâmetros
-              compartilhados). Avaliar um texto = rodar todas as camadas e
-              tirar a média, então os números ficam na mesma escala dos outros
-              modos (agulha = fração das camadas que a mantiveram).
+  geral       um cache para o modelo todo; o estado usa a atenção média de
+              todas as camadas e cabeças. Episódio = um texto.
+  por_camada  um cache por camada. Episódio = um texto visto por UMA camada,
+              com a atenção daquela camada; o estado diz qual camada é.
+  por_cabeca  um cache por cabeça de atenção (no GPT-2, 12 x 12 = 144).
+              Episódio = um texto visto por UMA cabeça; o estado diz qual é.
 
-Cada camada é um episódio separado porque os caches das camadas não interagem:
-juntar as decisões de várias camadas no mesmo episódio faria o "próximo estado"
-de uma decisão ser o cache de outra camada, que o agente não vê.
+Nos modos por camada e por cabeça, o mesmo agente serve para todas as unidades
+(parâmetros compartilhados). Cada unidade é um episódio separado porque os
+caches não interagem: juntar várias unidades no mesmo episódio faria o "próximo
+estado" de uma decisão ser o cache de outra unidade, que o agente não vê.
+
+A agulha só importa para quem a consulta. Por isso o bônus de cada unidade é
+`bonus_agulha` vezes a relevância dela: a atenção que a pergunta final dá à
+agulha naquela unidade, dividida pela da unidade que mais a consulta. A métrica
+"agulha" de um texto é a fração dessa atenção que foi preservada: no modo
+geral é 0 ou 1; por camada/cabeça, a média ponderada das unidades.
 
 Ação: índice em {0, ..., orcamento}. Os candidatos ficam ordenados por posição
 no texto, então o índice `orcamento` é sempre o bloco que acabou de chegar.
 
-Observação, por candidato: idade, sink, posição e, para cada fonte de atenção
-(1 nos modos geral e por_camada, G no modo grupos), atenção acumulada e recente.
-Depois vem o progresso no texto e, no modo por_camada, qual camada é (one-hot).
+Observação, por candidato: idade, sink, posição, atenção acumulada e atenção
+recente. Depois vem o progresso no texto e, nos modos por camada e por cabeça,
+qual unidade é (one-hot).
 """
 
 from __future__ import annotations
@@ -44,9 +45,10 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
-from .traces import Trace, agrupar_camadas
+from .traces import Trace
 
-MODOS = ("geral", "grupos", "por_camada")
+MODOS = ("geral", "por_camada", "por_cabeca")
+FEATURES = ("idade", "eh_sink", "posicao", "atencao_acumulada", "atencao_recente")
 
 
 class KVCacheEnv(gym.Env):
@@ -56,13 +58,13 @@ class KVCacheEnv(gym.Env):
         self,
         traces: Sequence[Trace],
         orcamento: int = 16,
-        janela_recente: int = 32,
+        janela_recente: int = 2,
         n_sink: int = 1,
         bonus_agulha: float = 10.0,
         modo: str = "geral",
-        grupos: int = 3,
         render_mode: str | None = None,
     ):
+        """janela_recente: em blocos (2 blocos = 32 tokens)."""
         super().__init__()
         if not traces:
             raise ValueError("passe ao menos um trace")
@@ -71,6 +73,8 @@ class KVCacheEnv(gym.Env):
         for tr in traces:
             if tr.n_blocos <= orcamento + 1:
                 raise ValueError(f"trace {tr.nome!r} tem poucos blocos para orcamento={orcamento}")
+            if modo == "por_camada" and tr.camadas is None or modo == "por_cabeca" and tr.cabecas is None:
+                raise ValueError(f"o trace {tr.nome!r} não tem a atenção que o modo {modo} precisa: gere os traces de novo")
         self.traces = list(traces)
         self.B = orcamento
         self.janela = janela_recente
@@ -79,58 +83,84 @@ class KVCacheEnv(gym.Env):
         self.modo = modo
         self.render_mode = render_mode
 
-        # atenção usada pelo ambiente: (G, T, nb) por trace
+        tr0 = self.traces[0]
         if modo == "geral":
-            self.G = 1
-            self._att = [tr.att[None] for tr in self.traces]
+            self.U, self.forma = 1, ()
+        elif modo == "por_camada":
+            self.U, self.forma = tr0.camadas.shape[0], (tr0.camadas.shape[0],)
         else:
-            self.G = grupos
-            self._att = [agrupar_camadas(tr, grupos) for tr in self.traces]
+            L, H = tr0.cabecas.shape[:2]
+            self.U, self.forma = L * H, (L, H)
 
-        self.n_fontes = self.G if modo == "grupos" else 1
+        # pesos da agulha por unidade: relevância (máx = 1, usada no bônus) e peso (soma = 1, usada na métrica)
+        self._relevancia, self._peso = [], []
+        for tr in self.traces:
+            w = self._atencao_na_agulha(tr)
+            self._relevancia.append(w / w.max() if w.max() > 0 else np.ones(self.U))
+            self._peso.append(w / w.sum() if w.sum() > 0 else np.full(self.U, 1 / self.U))
+
         self.n_cand = self.B + 1
-        self.n_feat = 3 + 2 * self.n_fontes
-        dim = self.n_cand * self.n_feat + 1 + (self.G if modo == "por_camada" else 0)
+        dim = self.n_cand * len(FEATURES) + 1 + (self.U if modo != "geral" else 0)
         # features de atenção são escaladas por n_cand (atenção uniforme = 1), então ficam em [0, n_cand]
         self.observation_space = spaces.Box(low=0.0, high=float(self.n_cand), shape=(dim,), dtype=np.float32)
         self.action_space = spaces.Discrete(self.n_cand)
 
         self.trace: Trace | None = None
-        self.camada = 0
+        self.unidade = 0
+
+    # --------------------------------------------------------- unidades
+    def _matriz(self, i: int, u: int) -> np.ndarray:
+        tr = self.traces[i]
+        if self.modo == "geral":
+            return tr.att
+        if self.modo == "por_camada":
+            return tr.camadas[u].astype(np.float32)
+        return tr.cabecas[u // self.forma[1], u % self.forma[1]].astype(np.float32)
+
+    def _atencao_na_agulha(self, tr: Trace) -> np.ndarray:
+        """Atenção que o último bloco (a pergunta) dá à agulha, em cada unidade."""
+        if tr.agulha < 0:
+            return np.ones(self.U)
+        if self.modo == "geral":
+            return np.ones(1)
+        if self.modo == "por_camada":
+            return tr.camadas[:, -1, tr.agulha].astype(np.float64)
+        return tr.cabecas[:, :, -1, tr.agulha].astype(np.float64).reshape(-1)
+
+    def nome_unidade(self, u: int) -> str:
+        if self.modo == "geral":
+            return "modelo"
+        if self.modo == "por_camada":
+            return f"camada {u}"
+        return f"camada {u // self.forma[1]}, cabeça {u % self.forma[1]}"
 
     @property
     def decisoes_por_texto(self) -> int:
-        """Decisões para processar um texto inteiro (todas as camadas, no modo por_camada)."""
-        por_cache = self.traces[0].n_blocos - 1 - self.B
-        return por_cache * (self.G if self.modo == "por_camada" else 1)
+        """Decisões para processar um texto inteiro em todas as unidades."""
+        return (self.traces[0].n_blocos - 1 - self.B) * self.U
 
     def episodios_avaliacao(self) -> list[dict]:
-        """Opções de reset que cobrem cada trace uma vez (e cada camada, no modo por_camada)."""
-        if self.modo == "por_camada":
-            return [{"trace": i, "camada": c} for i in range(len(self.traces)) for c in range(self.G)]
-        return [{"trace": i} for i in range(len(self.traces))]
+        """Opções de reset que cobrem cada trace em cada unidade uma vez."""
+        return [{"trace": i, "unidade": u} for i in range(len(self.traces)) for u in range(self.U)]
 
     # ------------------------------------------------------------------ API
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         options = options or {}
         i = int(options["trace"]) if "trace" in options else int(self.np_random.integers(len(self.traces)))
+        u = int(options["unidade"]) if "unidade" in options else int(self.np_random.integers(self.U))
+        self.i, self.unidade = i, u
         self.trace = self.traces[i]
-        if self.modo == "por_camada":
-            c = int(options["camada"]) if "camada" in options else int(self.np_random.integers(self.G))
-            self.camada = c
-            self.A = self._att[i][c:c + 1]  # (1, T, nb): só a camada deste episódio
-        else:
-            self.camada = 0
-            self.A = self._att[i]  # (G, T, nb)
+        self.A = self._matriz(i, u)  # (nb, nb)
+        self.nb = self.trace.n_blocos
 
-        tr = self.trace
-        self.bs, self.nb, self.T = tr.bloco, tr.n_blocos, tr.n_tokens
+        self._onehot = np.zeros(self.U if self.modo != "geral" else 0, dtype=np.float32)
+        if self.modo != "geral":
+            self._onehot[u] = 1.0
         self.cache: list[int] = []
         self.despejados = np.zeros(self.nb, dtype=bool)
-        self.acum = np.zeros((self.A.shape[0], self.nb), dtype=np.float64)
+        self.acum = np.zeros(self.nb, dtype=np.float64)
         self.n_vistos = np.zeros(self.nb, dtype=np.int64)
-        self.t = 0
         self.perda_total = 0.0
 
         # blocos 0..B entram e são processados sem decisão
@@ -139,7 +169,8 @@ class KVCacheEnv(gym.Env):
             self._processar_bloco(k)
         self.k = self.B  # último bloco que entrou
 
-        return self._obs(), self._info()
+        f = self._features()
+        return self._obs(f), self._info(f)
 
     def step(self, acao):
         acao = int(acao)
@@ -156,17 +187,17 @@ class KVCacheEnv(gym.Env):
         recompensa = -perda
 
         terminou = self.k == self.nb - 1
-        agulha = None
-        if terminou and self.trace.agulha >= 0:
-            agulha = float(self.trace.agulha in self.cache)
-            recompensa += self.bonus_agulha * agulha
-
-        info = self._info()
+        f = self._features()
+        info = self._info(f)
         info["bloco_despejado"] = bloco_saiu
         if terminou:
             info["atencao_perdida_media"] = self.perda_total / (self.nb - 1 - self.B)
-            info["agulha_mantida"] = agulha
-        return self._obs(), float(recompensa), bool(terminou), False, info
+            if self.trace.agulha >= 0:
+                mantida = float(self.trace.agulha in self.cache)
+                recompensa += self.bonus_agulha * mantida * float(self._relevancia[self.i][self.unidade])
+                info["agulha_mantida"] = mantida
+                info["peso_agulha"] = float(self._peso[self.i][self.unidade])
+        return self._obs(f), float(recompensa), bool(terminou), False, info
 
     def render(self):
         if self.render_mode != "ansi":
@@ -179,19 +210,16 @@ class KVCacheEnv(gym.Env):
                 marca.append(".")
             else:
                 marca.append(" ")
-        return f"[{''.join(marca)}] camada {self.camada} bloco {self.k}/{self.nb - 1}"
+        return f"[{''.join(marca)}] {self.nome_unidade(self.unidade)}, bloco {self.k}/{self.nb - 1}"
 
     # ------------------------------------------------------- auxiliares
     def _processar_bloco(self, k: int) -> float:
-        """Roda os tokens do bloco k. Retorna a atenção média perdida por token
-        (média também sobre os grupos de camadas, quando há mais de um)."""
-        ini, fim = k * self.bs, min((k + 1) * self.bs, self.T)
-        linhas = self.A[:, ini:fim]  # (fontes, tokens, nb)
-        perda = float(linhas[:, :, self.despejados].sum(axis=2).mean()) if self.despejados.any() else 0.0
+        """Os tokens do bloco k consultam o cache. Retorna a atenção média perdida por token."""
+        linha = self.A[k]
+        perda = float(linha[self.despejados].sum())
         ids = np.array(self.cache)
-        self.acum[:, ids] += linhas[:, :, ids].sum(axis=1)
-        self.n_vistos[ids] += fim - ini
-        self.t = fim
+        self.acum[ids] += linha[ids]
+        self.n_vistos[ids] += 1
         return perda
 
     def _features(self) -> np.ndarray:
@@ -200,29 +228,23 @@ class KVCacheEnv(gym.Env):
         idade = (self.k - ids) / self.nb
         sink = (ids < self.n_sink).astype(np.float64)
         pos = ids / self.nb
-        acum = self.acum[:, ids] / np.maximum(self.n_vistos[ids], 1) * escala  # (fontes, cand)
-        ini = max(0, self.t - self.janela)
-        recente = self.A[:, ini:self.t][:, :, ids].mean(axis=1) * escala
-        return np.column_stack([idade, sink, pos, acum.T, recente.T])
+        acum = self.acum[ids] / np.maximum(self.n_vistos[ids], 1) * escala
+        recente = self.A[max(0, self.k - self.janela + 1):self.k + 1, ids].mean(axis=0) * escala
+        return np.column_stack([idade, sink, pos, acum, recente])
 
-    def _obs(self) -> np.ndarray:
-        partes = [self._features().reshape(-1), [self.t / self.T]]
-        if self.modo == "por_camada":
-            partes.append(np.eye(self.G)[self.camada])
-        return np.concatenate(partes).astype(np.float32)
+    def _obs(self, f: np.ndarray) -> np.ndarray:
+        return np.concatenate([f.reshape(-1), [(self.k + 1) / self.nb], self._onehot]).astype(np.float32)
 
-    def _info(self) -> dict:
-        f = self._features()
-        nf = self.n_fontes
+    def _info(self, f: np.ndarray) -> dict:
         return {
             "candidatos": np.array(self.cache),
-            "camada": self.camada,
+            "unidade": self.unidade,
             "idade": f[:, 0],
-            "atencao_acumulada": f[:, 3:3 + nf].mean(axis=1),
-            "atencao_recente": f[:, 3 + nf:].mean(axis=1),
+            "atencao_acumulada": f[:, 3],
+            "atencao_recente": f[:, 4],
         }
 
     # usado só pelo oráculo (olha o futuro, serve de limite superior)
     def massa_futura(self) -> np.ndarray:
         ids = np.array(self.cache)
-        return self.A[:, self.t:][:, :, ids].sum(axis=1).mean(axis=0)
+        return self.A[self.k + 1:, ids].sum(axis=0)

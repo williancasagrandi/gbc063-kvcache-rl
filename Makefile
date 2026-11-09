@@ -1,11 +1,11 @@
 # Uso:
 #   make tudo                       um modo (MODO=geral por padrão), GPT-2
-#   make tudo MODO=por_camada       outro modo
-#   make tudo-modos                 os três modos + gráfico comparando (~40 min)
+#   make tudo MODO=por_cabeca       outro modo (geral, por_camada, por_cabeca)
+#   make tudo-modos                 os três modos + gráfico comparando (~1 h)
 #   make tudo FONTE=sintetico       sem GPU e sem internet
 FONTE ?= gpt2
 MODO ?= geral
-MODOS = geral grupos por_camada
+MODOS = geral por_camada por_cabeca
 PY ?= .venv/bin/python
 
 .PHONY: setup setup-gpt2 teste traces baselines treinar graficos tudo modos comparar tudo-modos limpar

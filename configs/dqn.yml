@@ -1,15 +1,16 @@
 # Hiperparâmetros do DQN, no mesmo formato do dqn.yml da atividade de Atari.
-# Uma entrada por modo do ambiente (scripts usam --modo geral|grupos|por_camada).
+# Uma entrada por modo do ambiente (scripts usam --modo geral|por_camada|por_cabeca).
 #
 # Diferenças em relação ao Atari e o porquê:
 #   policy MlpPolicy      o estado é um vetor de números, não uma imagem
 #   sem AtariWrapper      o histórico já está no estado (atenção acumulada)
-#   n_timesteps 200k      um episódio tem só 47 decisões (~4.250 textos)
-#   learning_starts 5k    100k seria metade do treino
+#   n_timesteps           um episódio tem só 47 decisões
+#   learning_starts 5k    100k seria uma fração grande do treino
 #   exploration_fraction  explorar mais para descobrir o prêmio da agulha
 #   eval_freq             a cada quantos passos avaliar no teste (não é do SB3)
 
-# Modo geral: um cache, atenção média de todas as camadas. 86 entradas, 47 decisões por texto.
+# Geral: um cache para o modelo todo, atenção média. 86 entradas.
+# 200k passos ≈ 4.250 episódios (textos).
 KVCache-v0:
   policy: 'MlpPolicy'
   n_timesteps: !!float 2e5
@@ -32,34 +33,9 @@ KVCache-v0:
     orcamento: 16
     bonus_agulha: 10.0
 
-# Modo grupos: um cache, atenção separada em 3 grupos de 4 camadas. 154 entradas, 47 decisões por texto.
-KVCacheGrupos-v0:
-  policy: 'MlpPolicy'
-  n_timesteps: !!float 2e5
-  buffer_size: 100000
-  learning_rate: !!float 1e-4
-  batch_size: 64
-  learning_starts: 5000
-  gamma: 0.99
-  target_update_interval: 1000
-  train_freq: 4
-  gradient_steps: 1
-  exploration_fraction: 0.3
-  exploration_initial_eps: 1.0
-  exploration_final_eps: 0.05
-  policy_kwargs:
-    net_arch: [128, 128]
-  eval_freq: 5000
-  env_kwargs:
-    modo: grupos
-    grupos: 3
-    orcamento: 16
-    bonus_agulha: 10.0
-
-# Modo por_camada: um cache por camada (12). Cada episódio é um texto visto por uma
-# camada (47 decisões); o mesmo agente serve para todas e recebe qual camada é.
-# 98 entradas. Avaliar um texto = rodar as 12 camadas (564 decisões), por isso
-# avaliamos com menos frequência. 300k passos ≈ 6.400 episódios (~530 textos × 12 camadas).
+# Por camada: um cache por camada (12). Episódio = um texto visto por uma camada;
+# o mesmo agente serve para todas e recebe qual camada é. 98 entradas.
+# 300k passos ≈ 6.400 episódios (≈530 textos × 12 camadas).
 KVCachePorCamada-v0:
   policy: 'MlpPolicy'
   n_timesteps: !!float 3e5
@@ -79,6 +55,32 @@ KVCachePorCamada-v0:
   eval_freq: 10000
   env_kwargs:
     modo: por_camada
-    grupos: 12
+    orcamento: 16
+    bonus_agulha: 10.0
+
+# Por cabeça: um cache por cabeça de atenção (12 camadas × 12 cabeças = 144).
+# Episódio = um texto visto por uma cabeça; o estado diz qual é. 230 entradas.
+# Rede maior e mais passos: o agente precisa aprender o papel de 144 cabeças.
+# 500k passos ≈ 10.600 episódios (≈74 por cabeça). Cada avaliação roda
+# 50 textos × 144 cabeças, então avaliamos com menos frequência.
+KVCachePorCabeca-v0:
+  policy: 'MlpPolicy'
+  n_timesteps: !!float 5e5
+  buffer_size: 200000
+  learning_rate: !!float 1e-4
+  batch_size: 64
+  learning_starts: 5000
+  gamma: 0.99
+  target_update_interval: 1000
+  train_freq: 4
+  gradient_steps: 1
+  exploration_fraction: 0.3
+  exploration_initial_eps: 1.0
+  exploration_final_eps: 0.05
+  policy_kwargs:
+    net_arch: [256, 256]
+  eval_freq: 25000
+  env_kwargs:
+    modo: por_cabeca
     orcamento: 16
     bonus_agulha: 10.0
