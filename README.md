@@ -138,6 +138,24 @@ A atenção perdida é um **proxy**: rápida de calcular, por isso serve para tr
 
 As diferenças entre políticas são **pareadas** (mesmos textos) e vêm com intervalo de 95%: o script diz, para cada política, se ela é melhor, pior ou empata com o H2O e com o TOVA. A avaliação roda em float32 por padrão, porque em bfloat16 o arredondamento já mexe na NLL na terceira casa.
 
+### Resultados no Qwen2.5-0.5B
+
+50 textos de teste de 1.024 tokens, cache de 16 blocos (25% do texto), 3 sementes do DQN por modo. Com o cache completo, o modelo acerta a senha em todos os textos.
+
+| Modo | KL do H2O ajustado | KL do TOVA | KL do DQN (média) | DQN contra H2O | DQN contra TOVA | Senha: DQN (regras: 0%) |
+|---|---|---|---|---|---|---|
+| Geral | 0,130 | 0,118 | 0,118 | 3 sementes melhores | 3 empates | 13% |
+| Por camada | 0,114 | 0,112 | 0,111 | 1 melhor, 2 empates | 1 melhor, 2 empates | 1% |
+| Por cabeça | 0,106 | 0,111 | 0,108 | 3 empates | 3 empates | 0% |
+
+KL em nats por token; vereditos pareados, texto a texto, com IC de 95%.
+
+- **O DQN ganha do H2O ajustado no modo geral** (−0,011 a −0,015 nats/token, as três sementes) e empata com o TOVA. Nos modos mais finos, os competidores empatam. Nenhuma semente perde de nenhuma regra.
+- **Nenhuma regra fixa é a melhor nos três modos**: o TOVA vence no geral, e o H2O fica à frente por cabeça. O DQN acompanha a melhor em cada modo com o mesmo código, como previa o teto das features.
+- **A primeira versão** (MLP, crédito por passo) perdia do H2O nas 9 sementes (KL 0,156 / 0,131 / 0,118). As regras deram os mesmos números nas duas rodadas, então a melhora é do agente.
+- **O proxy mal separa as boas políticas**: o Spearman dentro do texto entre atenção perdida e KL é 0,44 / 0,36 / 0,34 entre as competitivas. No modo geral, o DQN tem a mesma atenção perdida do H2O (10,62%) e KL 10% menor.
+- **Cautela:** o desenho final do DQN (rede por candidato, crédito por despejo) foi escolhido depois de ver a primeira rodada nos mesmos textos de teste. O modelo avaliado é o do fim do treino, não o melhor checkpoint.
+
 ### Como rodar
 
 Requer Python 3.10+ (no Debian/Ubuntu: `sudo apt install python3-venv`).
@@ -181,10 +199,10 @@ Os traces gravados antes desta versão não guardavam os tokens do texto e não 
 | `resultados/<fonte>/<modo>/figuras/comparacao_final.png` | atenção perdida e agulha no cache (proxy) por política |
 | `resultados/<fonte>/<modo>/modelo_real.csv` | **por política: aumento da perplexidade e senha recuperada no LLM**, com IC de 95% |
 | `resultados/<fonte>/<modo>/modelo_real_textos.csv` | o mesmo, texto a texto, com a atenção perdida ao lado |
-| `resultados/<fonte>/<modo>/modelo_real_resumo.json` | correlação proxy × real e diferenças pareadas contra o H2O |
-| `resultados/<fonte>/comparacao_modos_real.png` | **H2O e DQN nos três modos, medidos no LLM** |
+| `resultados/<fonte>/<modo>/modelo_real_resumo.json` | correlação proxy × real e diferenças pareadas contra o H2O e o TOVA |
+| `resultados/<fonte>/comparacao_modos_real.png` | **H2O, TOVA e DQN nos três modos, medidos no LLM** |
 | `resultados/<fonte>/proxy_x_real.png` | atenção perdida × aumento da perplexidade, por texto e política |
-| `resultados/<fonte>/comparacao_modos.png` e `.csv` | H2O e DQN nos três modos, no proxy |
+| `resultados/<fonte>/comparacao_modos.png` e `.csv` | H2O, TOVA e DQN nos três modos, no proxy |
 
 ### Estrutura
 
@@ -205,7 +223,7 @@ tests/                           ambiente, gravação da atenção e equivalênc
 ## Entregas
 
 - [x] **Desafio 1** — apresentação do problema: ambiente/estado, ações e recompensas — 29/10/2026 ([slides](apresentacoes/desafio1/))
-- [ ] **Desafio 2** — DQN no problema e gráficos dos resultados — 12/11/2026
+- [x] **Desafio 2** — DQN no problema e gráficos dos resultados — 12/11/2026
 
 ## Referências
 
