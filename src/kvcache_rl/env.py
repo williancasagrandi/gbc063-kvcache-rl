@@ -55,6 +55,18 @@ from .traces import Trace
 MODOS = ("geral", "por_camada", "por_cabeca")
 FEATURES = ("idade", "eh_sink", "posicao", "atencao_acumulada", "atencao_recente")
 
+# Duas formas de distribuir a mesma recompensa ao longo do episódio. A atenção perdida
+# total é a mesma nas duas: somar, bloco a bloco, a atenção dada aos despejados é o
+# mesmo que somar, despejo a despejo, a atenção que cada despejado receberia depois.
+#   por_passo    r_t = -(atenção do bloco lido no passo t a TODOS os já despejados).
+#                Mistura o custo de decisões antigas, que o agente não vê no estado,
+#                com o da atual: o alvo do Q fica ruidoso e o DQN degrada.
+#   por_despejo  r_t = -(atenção que o bloco despejado em t receberia até o fim do texto).
+#                Cada decisão recebe só o próprio custo (redistribuição de recompensa,
+#                como no RUDDER). O futuro entra só na recompensa, calculada depois que o
+#                texto termina; a política continua decidindo só com o passado.
+CREDITOS = ("por_despejo", "por_passo")
+
 
 class KVCacheEnv(gym.Env):
     metadata = {"render_modes": ["ansi"]}
@@ -67,14 +79,20 @@ class KVCacheEnv(gym.Env):
         n_sink: int = 1,
         bonus_agulha: float = 0.0,
         modo: str = "geral",
+        credito: str = "por_despejo",
         render_mode: str | None = None,
     ):
-        """janela_recente: em blocos (2 blocos = 32 tokens)."""
+        """janela_recente: em blocos (2 blocos = 32 tokens).
+        credito: "por_despejo" cobra de cada decisão a atenção que o bloco despejado receberia
+        dali até o fim do texto; "por_passo" cobra, a cada bloco lido, a atenção que ele daria a
+        todos os despejados até ali. O total do episódio é o mesmo (ver CREDITOS)."""
         super().__init__()
         if not traces:
             raise ValueError("passe ao menos um trace")
         if modo not in MODOS:
             raise ValueError(f"modo deve ser um de {MODOS}")
+        if credito not in CREDITOS:
+            raise ValueError(f"credito deve ser um de {CREDITOS}")
         for tr in traces:
             if tr.n_blocos <= orcamento + 1:
                 raise ValueError(f"trace {tr.nome!r} tem poucos blocos para orcamento={orcamento}")
@@ -86,6 +104,7 @@ class KVCacheEnv(gym.Env):
         self.n_sink = n_sink
         self.bonus_agulha = bonus_agulha
         self.modo = modo
+        self.credito = credito
         self.render_mode = render_mode
 
         tr0 = self.traces[0]
@@ -184,12 +203,14 @@ class KVCacheEnv(gym.Env):
 
         bloco_saiu = self.cache.pop(acao)
         self.despejados[bloco_saiu] = True
+        # custo desta decisão: a atenção que o bloco despejado receberia do próximo bloco até o fim
+        custo_despejo = float(self.A[self.k + 1:, bloco_saiu].sum())
 
         self.k += 1
         self.cache.append(self.k)
-        perda = self._processar_bloco(self.k)
+        perda = self._processar_bloco(self.k)  # a métrica continua sendo a perda de cada bloco lido
         self.perda_total += perda
-        recompensa = -perda
+        recompensa = -custo_despejo if self.credito == "por_despejo" else -perda
 
         terminou = self.k == self.nb - 1
         f = self._features()
@@ -248,8 +269,3 @@ class KVCacheEnv(gym.Env):
             "atencao_acumulada": f[:, 3],
             "atencao_recente": f[:, 4],
         }
-
-    # usado só pelo oráculo do proxy (olha o futuro; é referência, não limite superior)
-    def massa_futura(self) -> np.ndarray:
-        ids = np.array(self.cache)
-        return self.A[self.k + 1:, ids].sum(axis=0)

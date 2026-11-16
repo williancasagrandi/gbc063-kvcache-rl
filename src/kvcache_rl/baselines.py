@@ -46,20 +46,11 @@ def h2o(env, obs, info, n_recentes: int | None = None):
     return int(np.argmin(score))
 
 
-def oraculo(env, obs, info):
-    """Oráculo do proxy: despeja o bloco que receberá menos atenção no resto do texto.
-
-    Olha o futuro, então não é implementável; serve de referência para o proxy.
-    NÃO é limite superior: é guloso (decide um passo de cada vez), então nem no
-    proxy é o ótimo garantido; e minimiza a atenção perdida, não a qualidade no LLM
-    (na validação com um modelo treinado, perdeu do H2O na KL no modo geral).
-    Se a recompensa tiver bônus de agulha, também nunca despeja a agulha.
-    """
-    futura = env.massa_futura()
-    if env.bonus_agulha > 0 and env.trace.agulha >= 0:
-        futura = futura.copy()
-        futura[info["candidatos"] == env.trace.agulha] = np.inf
-    return int(np.argmin(futura))
+def tova(env, obs, info):
+    """TOVA (Oren et al., 2024): despeja o bloco que recebeu menos atenção das consultas mais
+    recentes. Aqui, a média dos últimos `janela_recente` blocos do ambiente (2 blocos = 32 tokens),
+    a mesma feature que o DQN vê. Não tem parâmetro para ajustar."""
+    return int(np.argmin(info["atencao_recente"]))
 
 
 BASELINES = {
@@ -67,7 +58,7 @@ BASELINES = {
     "janela_deslizante": janela_deslizante,
     "streaming_llm": streaming_llm,
     "h2o": h2o,
-    "oraculo": oraculo,
+    "tova": tova,
 }
 
 NOMES = {
@@ -75,7 +66,7 @@ NOMES = {
     "janela_deslizante": "Janela deslizante",
     "streaming_llm": "StreamingLLM",
     "h2o": "H2O",
-    "oraculo": "Oráculo do proxy",
+    "tova": "TOVA",
     "dqn": "DQN",
 }
 

@@ -19,7 +19,7 @@ from kvcache_rl.baselines import NOMES
 from kvcache_rl.config import CHAVES, NOMES_MODOS
 from kvcache_rl.visual import FONTES, TEMAS, carregar_resultados, estilo, num, preparar_matplotlib
 
-ORDEM = ["aleatoria", "janela_deslizante", "streaming_llm", "h2o", "dqn", "oraculo"]
+ORDEM = ["aleatoria", "janela_deslizante", "streaming_llm", "h2o", "tova", "dqn"]
 plt = preparar_matplotlib()
 
 
@@ -45,11 +45,10 @@ def curva_aprendizado(baselines, curvas, n_teste, t, saida: Path, fonte: str, mo
     fig.patch.set_facecolor(t["fundo"])
     estilo(ax, t)
 
-    # referências: linhas horizontais em cinza, oráculo tracejado
+    # referências: as regras fixas como linhas horizontais em cinza
     refs = [k for k in ORDEM if k in baselines]
     for k in refs:
-        ax.axhline(baselines[k]["retorno"], color=t["referencia"], linewidth=1.2,
-                   linestyle=(0, (5, 4)) if k == "oraculo" else "-", alpha=0.9 if k == "oraculo" else 0.55)
+        ax.axhline(baselines[k]["retorno"], color=t["referencia"], linewidth=1.2, alpha=0.55)
 
     if len(curvas) > 1:
         ax.fill_between(passos, lo, hi, color=t["destaque"], alpha=0.22, linewidth=0)
@@ -109,11 +108,7 @@ def comparacao_final(baselines, finais, t, saida: Path, modo: str):
         vmax = max(l[col + 2] if l[col + 2] is not None else l[col] for l in linhas)
         for yi, l in zip(y, linhas):
             k, v, lo, hi = l[0], l[col], l[col + 1], l[col + 2]
-            if k == "oraculo":  # referência que vê o futuro: só contorno
-                ax.barh(yi, v, height=0.62, color="none", edgecolor=t["referencia"], linewidth=1.2,
-                        linestyle=(0, (4, 3)))
-            else:
-                ax.barh(yi, v, height=0.62, color=t["destaque"] if k == "dqn" else t["barra"])
+            ax.barh(yi, v, height=0.62, color=t["destaque"] if k == "dqn" else t["barra"])
             if lo is not None and hi > lo:
                 ax.plot([lo, hi], [yi, yi], color=t["texto"], linewidth=1.4)
                 ax.plot([lo, lo], [yi - 0.12, yi + 0.12], color=t["texto"], linewidth=1.4)
@@ -131,7 +126,7 @@ def comparacao_final(baselines, finais, t, saida: Path, modo: str):
     for rot, l in zip(eixos[0].get_yticklabels(), linhas):
         rot.set_color(t["destaque"] if l[0] == "dqn" else t["texto"])
         rot.set_fontweight("bold" if l[0] == "dqn" else "normal")
-    nota = f"{NOMES_MODOS[modo]} · DQN: média de {len(finais)} sementes, traço = mín–máx · Oráculo do proxy (tracejado): vê o futuro, não é limite superior"
+    nota = f"{NOMES_MODOS[modo]} · DQN: média de {len(finais)} sementes, traço = mín–máx"
     if modo != "geral":
         nota += " · agulha ponderada pela atenção que cada unidade dá a ela"
     nota += " · métricas no LLM real: avaliar_no_modelo.py"

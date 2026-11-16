@@ -62,7 +62,7 @@ Extensão prevista: uma ação de "comprimir" (quantizar para 4 bits) em vez de 
 Rodar o LLM a cada decisão de treino seria lento demais. Por isso usamos um **ambiente proxy**:
 
 1. O LLM lê cada texto **uma única vez**, com o cache completo, e a atenção é gravada num *trace*: para cada cabeça de K/V, quanto os tokens de cada bloco consultam cada bloco anterior. O trace guarda também as médias por camada e do modelo todo.
-2. O ambiente (`KVCacheEnv`, Gymnasium) simula os despejos a partir do trace: a cada bloco novo, o agente escolhe quem sai e perde a atenção que os próximos tokens dariam aos blocos já apagados. **A recompensa é só isso: menos a atenção perdida.** O retorno de um episódio é menos a atenção perdida acumulada.
+2. O ambiente (`KVCacheEnv`, Gymnasium) simula os despejos a partir do trace: a cada bloco novo, o agente escolhe quem sai e perde a atenção que os próximos tokens dariam aos blocos já apagados. **A recompensa é só isso: menos a atenção perdida.** O retorno de um episódio é menos a atenção perdida acumulada. Cada decisão é cobrada pelo próprio custo: a atenção que o bloco despejado receberia dali até o fim do texto (ver [DQN](#dqn)).
 3. Cada texto tem uma **agulha** ("the secret code is NNNN") inserida em posição aleatória no primeiro quarto do texto, fora do bloco inicial, e uma pergunta sobre ela no final. Ela **não entra na recompensa**: serve só para testar, no fim, se o modelo ainda recupera uma informação distante.
 4. Ao final, cada política é avaliada **no próprio LLM**, com o cache podado: quanto a perplexidade do texto sobe e se o modelo ainda acerta a senha (ver [Métricas](#métricas-o-que-medimos-e-por-quê)).
 
@@ -99,12 +99,18 @@ Nos modos por camada e por cabeça, **o mesmo agente serve para todas as unidade
 
 ### DQN
 
-Stable-Baselines3 com `MlpPolicy`: uma saída Q(s, a) para cada um dos 17 candidatos. Hiperparâmetros em [`configs/dqn.yml`](configs/dqn.yml), no mesmo formato do `dqn.yml` da atividade de Atari, com uma entrada por modo:
+Stable-Baselines3, com duas escolhas que vieram da primeira execução no Qwen, em que o DQN perdeu do H2O em todos os modos e, no modo geral, terminou pior que a rede antes do treino.
+
+**Rede Q por candidato** (`src/kvcache_rl/rede.py`). A `MlpPolicy` recebe os 17 candidatos concatenados e precisa aprender a mesma regra 17 vezes, uma por posição. A rede por candidato aplica a mesma rede pequena a cada candidato (um embedding por candidato, a média deles como resumo do cache e o contexto de progresso e unidade) e devolve uma nota por candidato, como no Deep Sets. Ela consegue representar o H2O exatamente: treinada para imitá-lo, acerta mais de 95% das escolhas. Tem ~17 mil parâmetros. `--rede mlp` volta à versão anterior.
+
+**Crédito por despejo.** Na versão anterior, a recompensa de cada passo era a atenção que o bloco lido daria a **todos** os despejados até ali, inclusive por decisões antigas que o agente não vê no estado. Agora cada decisão é cobrada pela atenção que o bloco que ela despejou receberia até o fim do texto. A soma do episódio é exatamente a mesma (há um teste); muda só a hora em que cada custo é cobrado, como na redistribuição de recompensa do RUDDER. O futuro entra só na recompensa, calculada depois do texto; a política decide só com o passado. `--credito por_passo` volta à versão anterior.
+
+Hiperparâmetros em [`configs/dqn.yml`](configs/dqn.yml), no mesmo formato do `dqn.yml` da atividade de Atari, com uma entrada por modo:
 
 | Parâmetro | `geral` | `por_camada` | `por_cabeca` | Por quê |
 |---|---|---|---|---|
 | `n_timesteps` | 200.000 | 300.000 | 500.000 | ~4.250, ~6.400 e ~10.600 episódios de 47 decisões |
-| `policy_kwargs.net_arch` | 128×128 | 128×128 | 256×256 | por cabeça o agente aprende o papel de até 144 unidades |
+| `policy` | `PorCandidato`, `oculta: 64` | igual | igual | uma nota por candidato, pesos compartilhados |
 | `learning_starts` | 5.000 | 5.000 | 5.000 | episódios curtos; não precisa de 100 mil passos aleatórios |
 | `exploration_fraction` | 0,3 | 0,3 | 0,3 | ε de 1,0 a 0,05 nos primeiros 30% do treino |
 | `buffer_size` | 100k | 100k | 200k | |
@@ -112,24 +118,25 @@ Stable-Baselines3 com `MlpPolicy`: uma saída Q(s, a) para cada um dos 17 candid
 
 A política gulosa (sem exploração) é avaliada nos 50 textos de teste, em todas as unidades, a cada 5.000 / 10.000 / 25.000 passos. Treinamos com 3 sementes.
 
+**O teto das features.** Num experimento de controle, a mesma rede foi treinada por supervisão com o custo real de despejar **cada** um dos 17 candidatos, o que é mais informação do que o DQN recebe. Mesmo assim ela só empatou com o TOVA (sintético: 0,030 contra 0,028; GPT-2: 0,097 contra 0,099). Features mais ricas (atenção em log, do último bloco, pico e tendência) não mudaram isso. Com a história de atenção que o agente vê, o TOVA já está perto do melhor possível; vencê-lo por margem grande exigiria informação que a atenção passada não traz.
+
 ### Métricas: o que medimos e por quê
 
-A atenção perdida é um **proxy**: rápida de calcular, por isso serve para treinar, mas não diz o que acontece com o texto que o modelo prevê. Uma versão anterior também dava um bônus de `+10` por manter a agulha no cache; ele foi removido porque usava informação que a política não teria (onde está a agulha) e dominava o retorno (97% da diferença entre o H2O e o oráculo vinha dele). As métricas finais são medidas no LLM:
+A atenção perdida é um **proxy**: rápida de calcular, por isso serve para treinar, mas não diz o que acontece com o texto que o modelo prevê. Uma versão anterior também dava um bônus de `+10` por manter a agulha no cache; ele foi removido porque usava informação que a política não teria (onde está a agulha) e dominava o retorno (respondia por 97% do sinal). As métricas finais são medidas no LLM:
 
 | Métrica | O que é | Onde |
 |---|---|---|
-| **Aumento da perplexidade** (principal) | `exp(ΔNLL) − 1`, com ΔNLL = aumento médio da NLL por token com o cache podado, contra o cache completo, nas previsões feitas depois que o cache enche | LLM real |
+| **KL por token** (principal) | KL(p_cheio ‖ p_podado) da distribuição do próximo token, nas previsões feitas depois que o cache enche | LLM real |
+| **Aumento da perplexidade** | `exp(ΔNLL) − 1`, com ΔNLL = aumento médio da NLL por token com o cache podado, contra o cache completo | LLM real |
 | **Senha recuperada** | a decodificação gulosa ainda produz a senha inteira; só nos textos em que o modelo acerta com o cache completo | LLM real |
 | Atenção perdida | atenção que os blocos apagados receberiam com o cache completo | proxy (treino) |
-| Proxy × real | correlação de Spearman entre atenção perdida e ΔNLL, **dentro de cada texto** (as políticas competem no mesmo texto) | os dois |
+| Proxy × real | correlação de Spearman entre atenção perdida e KL, **dentro de cada texto**, só entre as políticas competitivas (StreamingLLM, H2O, TOVA e o DQN); a aleatória e a janela deslizante são tão piores que inflariam a correlação | os dois |
 
 **Como o LLM é avaliado com o cache podado.** Despejar um bloco do KV-cache equivale a proibir que as consultas seguintes o vejam. Então os despejos de uma política viram uma máscara de atenção — uma por camada, ou por cabeça de K/V — e um único forward com essa máscara dá exatamente o que o modelo calcularia apagando os blocos do cache durante a leitura (as posições dos tokens que ficam não mudam, como no H2O e no SnapKV). Ao contrário do proxy, aqui o softmax renormaliza: a atenção que iria para um bloco apagado se redistribui entre os que ficaram, como no modelo de verdade. O teste `test_mascara_igual_a_despejo_fisico` confere, no Qwen2 e no GPT-2, que os logits saem iguais aos de um KV-cache do qual os blocos foram de fato apagados.
 
-**Comparação justa.** O DQN escolhe os pesos dele nos textos de treino, minimizando a atenção perdida. As regras com parâmetro recebem o mesmo tratamento: `avaliar_baselines.py` escolhe, numa grade e **nos textos de treino**, quantos blocos recentes o H2O protege (de 0 até o orçamento inteiro) e quantos blocos de sink o StreamingLLM mantém (1 a 4), pelo mesmo critério. Ajustá-las pela KL no modelo real daria a elas um sinal melhor que o do DQN, e a injustiça só trocaria de lado. O teste não escolhe nada; o parâmetro escolhido e a grade inteira ficam em `ajuste.json`.
+**Comparação justa.** O DQN escolhe os pesos dele nos textos de treino, minimizando a atenção perdida. As regras com parâmetro recebem o mesmo tratamento: `avaliar_baselines.py` escolhe, numa grade e **nos textos de treino**, quantos blocos recentes o H2O protege (de 0 até o orçamento inteiro) e quantos blocos de sink o StreamingLLM mantém (1 a 4), pelo mesmo critério. O **TOVA** (Oren et al., 2024), que despeja o bloco com menos atenção recente, não tem parâmetro. Ajustá-las pela KL no modelo real daria a elas um sinal melhor que o do DQN, e a injustiça só trocaria de lado. O teste não escolhe nada; o parâmetro escolhido e a grade inteira ficam em `ajuste.json`.
 
-O **oráculo do proxy** olha o futuro e despeja o bloco que receberá menos atenção. Ele serve de referência para o proxy, mas **não é limite superior**: é guloso, então nem no proxy é o ótimo garantido, e minimiza a atenção perdida, não a qualidade no LLM. Num GPT-2 pequeno treinado para recuperar a senha, ele perdeu do H2O na KL no modo geral.
-
-As diferenças entre políticas são **pareadas** (mesmos textos) e vêm com intervalo de 95%: o script diz, para cada política, se ela é melhor, pior ou empata com o H2O. A avaliação roda em float32 por padrão, porque em bfloat16 o arredondamento já mexe na NLL na terceira casa.
+As diferenças entre políticas são **pareadas** (mesmos textos) e vêm com intervalo de 95%: o script diz, para cada política, se ela é melhor, pior ou empata com o H2O e com o TOVA. A avaliação roda em float32 por padrão, porque em bfloat16 o arredondamento já mexe na NLL na terceira casa.
 
 ### Como rodar
 
@@ -175,9 +182,9 @@ Os traces gravados antes desta versão não guardavam os tokens do texto e não 
 | `resultados/<fonte>/<modo>/modelo_real.csv` | **por política: aumento da perplexidade e senha recuperada no LLM**, com IC de 95% |
 | `resultados/<fonte>/<modo>/modelo_real_textos.csv` | o mesmo, texto a texto, com a atenção perdida ao lado |
 | `resultados/<fonte>/<modo>/modelo_real_resumo.json` | correlação proxy × real e diferenças pareadas contra o H2O |
-| `resultados/<fonte>/comparacao_modos_real.png` | **H2O, DQN e oráculo do proxy nos três modos, medidos no LLM** |
+| `resultados/<fonte>/comparacao_modos_real.png` | **H2O e DQN nos três modos, medidos no LLM** |
 | `resultados/<fonte>/proxy_x_real.png` | atenção perdida × aumento da perplexidade, por texto e política |
-| `resultados/<fonte>/comparacao_modos.png` e `.csv` | H2O, DQN e oráculo do proxy nos três modos, no proxy |
+| `resultados/<fonte>/comparacao_modos.png` e `.csv` | H2O e DQN nos três modos, no proxy |
 
 ### Estrutura
 
@@ -188,7 +195,8 @@ src/kvcache_rl/
   traces.py                      formato dos traces (por bloco; modelo, camada e cabeça) e gerador sintético
   llm.py                         gravação da atenção por cabeça de K/V (GPT-2, Qwen), agulha e NLL
   modelo_real.py                 despejos de uma política -> máscara de atenção no LLM real; métricas
-  baselines.py                   janela deslizante, StreamingLLM, H2O, aleatória, oráculo do proxy, ajuste e avaliação
+  baselines.py                   janela deslizante, StreamingLLM, H2O, TOVA, aleatória, ajuste e avaliação
+  rede.py                        rede Q por candidato (pesos compartilhados) para o DQN do SB3
   config.py, visual.py           leitura do dqn.yml e estilo dos gráficos
 scripts/                         gerar traces, avaliar (proxy e LLM), treinar, gráficos, comparar modos
 tests/                           ambiente, gravação da atenção e equivalência máscara = despejo de verdade
@@ -211,5 +219,8 @@ tests/                           ambiente, gravação da atenção e equivalênc
 - Ainslie et al. *GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints*. EMNLP 2023. [arXiv:2305.13245](https://arxiv.org/abs/2305.13245)
 - Qwen Team. *Qwen2.5 Technical Report*. 2024. [arXiv:2412.15115](https://arxiv.org/abs/2412.15115)
 - Mnih et al. *Human-level control through deep reinforcement learning* (DQN). Nature, 2015.
+- Oren et al. *Transformers are Multi-State RNNs* (TOVA). 2024. [arXiv:2401.06104](https://arxiv.org/abs/2401.06104)
+- Zaheer et al. *Deep Sets*. NeurIPS 2017. [arXiv:1703.06114](https://arxiv.org/abs/1703.06114)
+- Arjona-Medina et al. *RUDDER: Return Decomposition for Delayed Rewards*. NeurIPS 2019. [arXiv:1806.07857](https://arxiv.org/abs/1806.07857)
 - Merity et al. *Pointer Sentinel Mixture Models* (WikiText). 2016. [arXiv:1609.07843](https://arxiv.org/abs/1609.07843)
 - Sutton & Barto. *Reinforcement Learning: An Introduction*, 2ª ed., 2018.

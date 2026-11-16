@@ -6,6 +6,8 @@
     python scripts/treinar_dqn.py --fonte sintetico --modo geral --sementes 0 1 2
 
 Hiperparâmetros e parâmetros do ambiente vêm de configs/dqn.yml (uma entrada por modo).
+A rede Q padrão é a por candidato (src/kvcache_rl/rede.py); --rede mlp usa a MlpPolicy
+da versão anterior, para comparar.
 Treina nos traces de dados/<fonte>/treino e, a cada eval_freq passos, avalia a
 política gulosa (sem exploração) em todos os traces de teste.
 
@@ -29,6 +31,20 @@ from stable_baselines3.common.monitor import Monitor
 from kvcache_rl import KVCacheEnv, carregar_pasta
 from kvcache_rl.baselines import avaliar_dqn
 from kvcache_rl.config import CHAVES, carregar_config
+from kvcache_rl.env import CREDITOS, FEATURES
+from kvcache_rl.rede import PoliticaPorCandidato
+
+REDES = ("por_candidato", "mlp")
+
+
+def montar_politica(cfg: dict, rede: str, env) -> tuple:
+    """(classe ou nome da política, kwargs do DQN, policy_kwargs) para a rede escolhida."""
+    dqn = dict(cfg["dqn"])
+    pk = dict(dqn.pop("policy_kwargs", None) or {})
+    if rede == "por_candidato":
+        return PoliticaPorCandidato, dqn, {"n_cand": env.n_cand, "n_feat": len(FEATURES),
+                                           "oculta": int(pk.get("oculta", 64))}
+    return "MlpPolicy", dqn, {"net_arch": [int(x) for x in cfg["mlp_net_arch"]]}
 
 CAMPOS = ["passos", "epsilon", "retorno", "retorno_dp", "atencao_perdida", "agulha"]
 
@@ -77,9 +93,15 @@ def main():
     p.add_argument("--sementes", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--passos", type=int, default=None, help="sobrescreve n_timesteps do yml")
     p.add_argument("--freq-avaliacao", type=int, default=None, help="sobrescreve eval_freq do yml")
+    p.add_argument("--rede", choices=REDES, default=None, help="padrão: a do yml (por_candidato)")
+    p.add_argument("--credito", choices=CREDITOS, default=None,
+                   help="como a recompensa é distribuída (padrão: a do yml, por_despejo)")
     a = p.parse_args()
 
     cfg = carregar_config(a.config, a.modo)
+    rede = a.rede or cfg["rede"]
+    if a.credito:
+        cfg["env"]["credito"] = a.credito
     n_passos = a.passos or cfg["passos"]
     freq = a.freq_avaliacao or cfg["eval_freq"]
 
@@ -88,7 +110,9 @@ def main():
     env_treino = KVCacheEnv(treino, **cfg["env"])
     env_teste = KVCacheEnv(teste, **cfg["env"])
     print(f"modo {a.modo}: {len(treino)} traces de treino, {len(teste)} de teste ({a.fonte}); "
-          f"{env_teste.U} unidade(s) por texto; {n_passos} passos por semente")
+          f"{env_teste.U} unidade(s) por texto; {n_passos} passos por semente; rede Q {rede}; "
+          f"crédito {env_teste.credito}")
+    politica, kwargs_dqn, policy_kwargs = montar_politica(cfg, rede, env_treino)
 
     for seed in a.sementes:
         pasta = Path(f"resultados/{a.fonte}/{a.modo}/dqn/seed{seed}")
@@ -96,7 +120,10 @@ def main():
         print(f"\n== {a.modo}, semente {seed} ==")
 
         env = Monitor(env_treino, str(pasta / "monitor.csv"))
-        modelo = DQN(cfg["policy"], env, seed=seed, device="cpu", verbose=0, **cfg["dqn"])
+        modelo = DQN(politica, env, seed=seed, device="cpu", verbose=0, policy_kwargs=policy_kwargs, **kwargs_dqn)
+        if seed == a.sementes[0]:
+            n = sum(x.numel() for x in modelo.policy.q_net.parameters())
+            print(f"rede Q {rede}: {n:,} parâmetros".replace(",", "."))
 
         inicio = time.time()
         cb = AvaliacaoPeriodica(env_teste, freq, n_passos, pasta / "curva.csv")
@@ -104,7 +131,8 @@ def main():
         modelo.save(pasta / "modelo")
 
         final = dict(cb.final)
-        final.update(semente=seed, passos=n_passos, minutos=round((time.time() - inicio) / 60, 1))
+        final.update(semente=seed, passos=n_passos, rede=rede, credito=env_teste.credito,
+                     minutos=round((time.time() - inicio) / 60, 1))
         (pasta / "final.json").write_text(json.dumps(final, indent=2))
         print(f"final: {final}")
 

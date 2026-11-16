@@ -73,12 +73,17 @@ def resumo_dqn(finais: list[dict], chave: str) -> tuple[float, float, float]:
     return float(v.mean()), float(v.min()), float(v.max())
 
 
+def cor_serie(pol: str, t: dict) -> str:
+    """DQN em destaque; as regras em dois tons de cinza, para se distinguirem na legenda."""
+    return {"dqn": t["destaque"], "tova": t["referencia"]}.get(pol, t["barra"])
+
+
 def grafico_modos(plt, linhas: list[dict], series: list[tuple[str, str]], paineis: list[tuple],
                   t: dict, saida, subtitulo: str, legenda_traco: str):
     """Barras horizontais agrupadas: um grupo por modo, uma barra por política, dois painéis.
 
     linhas:  [{"modo": ..., "<pol>_<chave>": valor, "<pol>_<chave>_lo"/"_hi": traço (opcional)}]
-    series:  [(pol, rótulo)], de cima para baixo; "dqn" é destacada, "oraculo" só contorno
+    series:  [(pol, rótulo)], de cima para baixo; "dqn" é destacada
     paineis: [(chave, título, casas decimais, escala)], escala 100 para mostrar em %
     """
     from matplotlib.patches import Patch
@@ -108,11 +113,7 @@ def grafico_modos(plt, linhas: list[dict], series: list[tuple[str, str]], painei
                 if v is None or not np.isfinite(v):
                     continue
                 yi, v = c + d, v * escala
-                if pol == "oraculo":
-                    ax.barh(yi, v, height=alt, color="none", edgecolor=t["referencia"], linewidth=1.1,
-                            linestyle=(0, (4, 3)))
-                else:
-                    ax.barh(yi, v, height=alt, color=t["destaque"] if pol == "dqn" else t["barra"])
+                ax.barh(yi, v, height=alt, color=cor_serie(pol, t))
                 fim = max(v, 0.0)
                 lo, hi = l.get(f"{pol}_{chave}_lo"), l.get(f"{pol}_{chave}_hi")
                 if lo is not None and hi is not None and np.isfinite(lo) and hi > lo:
@@ -122,7 +123,7 @@ def grafico_modos(plt, linhas: list[dict], series: list[tuple[str, str]], painei
                         ax.plot([x, x], [yi - alt * 0.28, yi + alt * 0.28], color=t["texto"], linewidth=1.3)
                     fim = max(fim, hi)
                 ax.text(fim + amp * 0.02, yi, num(v, casas) + "%", va="center", fontsize=11,
-                        color=t["texto"] if pol != "oraculo" else t["secundario"],
+                        color=t["texto"],
                         fontweight="bold" if pol == "dqn" else "normal")
         ax.set_xlim(vmin - (amp * 0.04 if vmin < 0 else 0), vmax + amp * 0.2)
         if vmin < 0:
@@ -135,14 +136,12 @@ def grafico_modos(plt, linhas: list[dict], series: list[tuple[str, str]], painei
     eixo0.set_yticks(centros)
     eixo0.set_yticklabels([NOMES_MODOS[l["modo"]].replace(" (", "\n(") for l in linhas], fontsize=12, color=t["texto"])
 
-    cores = {"dqn": dict(facecolor=t["destaque"]), "oraculo": dict(facecolor="none", edgecolor=t["referencia"],
-                                                                 linestyle=(0, (4, 3)))}
-    itens = [Patch(label=rot, **cores.get(pol, dict(facecolor=t["barra"]))) for pol, rot in series]
+    itens = [Patch(label=rot, facecolor=cor_serie(pol, t)) for pol, rot in series]
     leg = fig.legend(handles=itens, loc="lower left", bbox_to_anchor=(0.2, 0.035), ncol=len(itens), frameon=False,
                      fontsize=11, labelcolor=t["secundario"], handlelength=1.2, columnspacing=2.0)
     for h in leg.legend_handles:
         h.set_height(9)
-    fig.text(0.2, 0.95, subtitulo, color=t["secundario"], fontsize=10.5)
+    fig.text(0.02, 0.95, subtitulo, color=t["secundario"], fontsize=10.5)
     if legenda_traco:
         fig.text(0.2 + 0.006, 0.012, legenda_traco, color=t["secundario"], fontsize=9.5)
     fig.subplots_adjust(left=0.2, right=0.97, top=0.86, bottom=0.18, wspace=0.12)

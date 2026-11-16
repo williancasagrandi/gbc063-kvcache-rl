@@ -4,7 +4,7 @@
     python scripts/avaliar_no_modelo.py --fonte qwen --modo por_cabeca
     python scripts/avaliar_no_modelo.py --fonte gpt2 --modo por_camada --n-textos 10   # rápido
 
-Para cada texto de teste e cada política (regras fixas e o DQN de cada semente):
+Para cada texto de teste e cada política (5 regras fixas e o DQN de cada semente):
   1. roda a política no ambiente, em todas as unidades (camadas / cabeças de K/V),
      e anota quem foi despejado e quando;
   2. roda o LLM uma vez com a máscara correspondente, que equivale a apagar
@@ -23,7 +23,7 @@ Métricas, por texto (médias nas previsões feitas depois que o cache enche):
 Saída em resultados/<fonte>/<modo>/:
   modelo_real.csv          uma linha por política (e por semente do DQN; "dqn" = média)
   modelo_real_textos.csv   uma linha por texto e política
-  modelo_real_resumo.json  correlação proxy x real e diferenças pareadas contra o H2O
+  modelo_real_resumo.json  correlação proxy x real e diferenças pareadas contra H2O e TOVA
 """
 
 import argparse
@@ -35,12 +35,14 @@ import numpy as np
 from tqdm import tqdm
 
 from kvcache_rl import KVCacheEnv, carregar_pasta
+from kvcache_rl.baselines import NOMES as NOME
 from kvcache_rl.baselines import politicas_ajustadas
 from kvcache_rl.config import CHAVES, carregar_config
 from kvcache_rl.llm import MODELOS, carregar_modelo, passada
 from kvcache_rl.modelo_real import Mascara, despejos_do_texto, metricas, spearman, visibilidade_do_texto
 
-POLITICAS = ["aleatoria", "janela_deslizante", "streaming_llm", "h2o", "oraculo"]
+POLITICAS = ["aleatoria", "janela_deslizante", "streaming_llm", "h2o", "tova"]
+REFERENCIAS = ("h2o", "tova")  # as regras fortes contra as quais cada política é comparada texto a texto
 CAMPOS = ["atencao_perdida", "kl", "delta_nll", "acerto", "delta_nll_resposta"]
 
 
@@ -74,12 +76,19 @@ def resumir(linhas: list[dict], nome: str) -> dict:
     return r
 
 
-def correlacao_dentro_do_texto(linhas: list[dict], chave: str) -> tuple[float, int]:
-    """Spearman entre atenção perdida e `chave` entre as regras fixas de cada texto, média nos textos.
-    É o que importa para usar o proxy no treino: ele ordena as políticas como o modelo real?"""
+# A aleatória e a janela deslizante (que apaga o bloco inicial) são tão piores que qualquer
+# métrica as ordena certo; incluí-las inflaria a correlação. O que importa para treinar é se o
+# proxy distingue as políticas competitivas entre si.
+TRIVIAIS = ("aleatoria", "janela_deslizante")
+
+
+def correlacao_dentro_do_texto(linhas: list[dict], chave: str, sem_triviais: bool = True) -> tuple[float, int]:
+    """Spearman entre atenção perdida e `chave` entre as políticas de cada texto, média nos textos.
+    Padrão: só as competitivas (StreamingLLM, H2O e cada semente do DQN). É o que importa para
+    usar o proxy no treino: ele ordena essas políticas como o modelo real?"""
     rs = []
     for txt in dict.fromkeys(l["texto"] for l in linhas):
-        sel = [l for l in linhas if l["texto"] == txt and not l["politica"].startswith("dqn_")]
+        sel = [l for l in linhas if l["texto"] == txt and not (sem_triviais and l["politica"] in TRIVIAIS)]
         rs.append(spearman([l["atencao_perdida"] for l in sel], [l[chave] for l in sel]))
     rs = [r for r in rs if np.isfinite(r)]
     return (float(np.mean(rs)) if rs else float("nan")), len(rs)
@@ -152,22 +161,27 @@ def main():
         resumo.append(dqn)
 
     acerto_cheio = float(np.mean([l["acerto_cheio"] for l in linhas if l["politica"] == next(iter(politicas))]))
-    extra = {"acerto_cache_completo": acerto_cheio, "correlacao_proxy": {}, "pareado_contra_h2o": {}}
+    extra = {"acerto_cache_completo": acerto_cheio, "correlacao_proxy": {}, "pareado": {}}
     for chave in ("kl", "delta_nll"):
         rho, n = correlacao_dentro_do_texto(linhas, chave)
         extra["correlacao_proxy"][chave] = {
             "spearman_dentro_do_texto": rho, "textos": n,
+            "politicas": sorted({l["politica"] for l in linhas if l["politica"] not in TRIVIAIS}),
+            "spearman_com_as_triviais": correlacao_dentro_do_texto(linhas, chave, sem_triviais=False)[0],
             "spearman_todos_os_pares": spearman([l["atencao_perdida"] for l in linhas], [l[chave] for l in linhas])}
-    if "h2o" in politicas:  # mesmos textos: diferença texto a texto, com intervalo de 95%
-        h2o = {l["texto"]: l for l in linhas if l["politica"] == "h2o"}
+    for ref in REFERENCIAS:  # mesmos textos: diferença texto a texto, com intervalo de 95%
+        if ref not in politicas:
+            continue
+        base = {l["texto"]: l for l in linhas if l["politica"] == ref}
+        extra["pareado"][ref] = {}
         for nome in politicas:
-            if nome == "h2o":
+            if nome == ref:
                 continue
-            extra["pareado_contra_h2o"][nome] = {}
+            extra["pareado"][ref][nome] = {}
             for chave in ("kl", "delta_nll"):
-                m, ic = media_ic(l[chave] - h2o[l["texto"]][chave] for l in linhas if l["politica"] == nome)
-                extra["pareado_contra_h2o"][nome][chave] = {
-                    "diferenca": m, "ic95": ic, "melhor_que_h2o": bool(m + ic < 0), "pior_que_h2o": bool(m - ic > 0)}
+                m, ic = media_ic(l[chave] - base[l["texto"]][chave] for l in linhas if l["politica"] == nome)
+                extra["pareado"][ref][nome][chave] = {
+                    "diferenca": m, "ic95": ic, "melhor": bool(m + ic < 0), "pior": bool(m - ic > 0)}
 
     base = Path(f"resultados/{a.fonte}/{a.modo}")
     base.mkdir(parents=True, exist_ok=True)
@@ -194,15 +208,18 @@ def main():
         print("(senha: —, o modelo não acerta a senha em nenhum texto nem com o cache completo)")
 
     c = extra["correlacao_proxy"]
-    print(f"\no proxy ordena as políticas como o modelo real? Spearman dentro de cada texto "
-          f"(média de {c['kl']['textos']} textos; 1 = mesma ordem):")
+    print(f"\no proxy ordena as políticas competitivas como o modelo real? Spearman dentro de cada texto "
+          f"entre {', '.join(c['kl']['politicas'])} (média de {c['kl']['textos']} textos; 1 = mesma ordem):")
     print(f"  atenção perdida x KL: {c['kl']['spearman_dentro_do_texto']:.2f}    "
-          f"atenção perdida x ΔNLL: {c['delta_nll']['spearman_dentro_do_texto']:.2f}")
-    if extra["pareado_contra_h2o"]:
-        print("\ncontra o H2O, nos mesmos textos (KL da política − KL do H2O, IC de 95%):")
-        for nome, d in extra["pareado_contra_h2o"].items():
+          f"atenção perdida x ΔNLL: {c['delta_nll']['spearman_dentro_do_texto']:.2f}    "
+          f"(incluindo aleatória e janela deslizante, inflado: {c['kl']['spearman_com_as_triviais']:.2f})")
+    for ref, comp in extra["pareado"].items():
+        print(f"\ncontra o {NOME[ref]}, nos mesmos textos (KL da política − KL do {NOME[ref]}, IC de 95%):")
+        for nome, d in comp.items():
+            if nome in TRIVIAIS:
+                continue
             d = d["kl"]
-            veredito = "melhor" if d["melhor_que_h2o"] else "pior" if d["pior_que_h2o"] else "empate"
+            veredito = "melhor" if d["melhor"] else "pior" if d["pior"] else "empate"
             print(f"  {nome:<18} {d['diferenca']:+.4f} ± {d['ic95']:.4f}  ({veredito})")
     print(f"\nsalvo em {base}/modelo_real.csv, modelo_real_textos.csv e modelo_real_resumo.json")
 

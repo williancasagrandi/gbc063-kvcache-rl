@@ -6,7 +6,7 @@
 Lê resultados/<fonte>/<modo>/modelo_real_textos.csv dos modos que tiverem e salva
 em resultados/<fonte>/:
     comparacao_modos_real.png   aumento da perplexidade e senha recuperada, por modo,
-                                para H2O, DQN e oráculo (traço = IC de 95% entre textos)
+                                para H2O, TOVA e DQN (traço = IC de 95% entre textos)
     proxy_x_real.png            atenção perdida (proxy) x KL do modelo completo (real),
                                 um ponto por texto e política: o proxy prevê o real?
 """
@@ -23,7 +23,8 @@ from kvcache_rl.config import CHAVES, NOMES_MODOS
 from kvcache_rl.visual import FONTES, TEMAS, estilo, grafico_modos, num, preparar_matplotlib
 
 plt = preparar_matplotlib()
-SERIES = [("h2o", "H2O (melhor regra fixa)"), ("dqn", "DQN"), ("oraculo", "Oráculo do proxy (vê o futuro)")]
+SERIES = [("h2o", "H2O"), ("tova", "TOVA"), ("dqn", "DQN")]
+TRIVIAIS = ("aleatoria", "janela_deslizante")
 
 
 def ler_textos(caminho: Path) -> list[dict]:
@@ -93,10 +94,12 @@ def grafico_proxy_x_real(modos: dict, t: dict, saida: Path, fonte: str):
     for ax, (modo, (linhas, resumo)) in zip(eixos[0], modos.items()):
         estilo(ax, t)
         ax.grid(axis="x", color=t["grade"], linewidth=0.8)
-        fixas = [l for l in linhas if not l["politica"].startswith("dqn_")]
-        ax.scatter([l["atencao_perdida"] * 100 for l in fixas], [l["kl"] for l in fixas],
+        # só as competitivas: aleatória e janela deslizante (KL de 2 a 4 no Qwen) achatariam o resto
+        comp = [l for l in linhas if l["politica"] not in TRIVIAIS]
+        ax.scatter([l["atencao_perdida"] * 100 for l in comp], [l["kl"] for l in comp],
                    s=9, color=t["barra"], alpha=0.55, linewidths=0)
-        pols = sorted({l["politica"] for l in fixas}) + (["dqn"] if any(l["politica"].startswith("dqn_") for l in linhas) else [])
+        pols = sorted({l["politica"] for l in comp if not l["politica"].startswith("dqn_")})
+        pols += ["dqn"] if any(l["politica"].startswith("dqn_") for l in linhas) else []
         pontos = []
         for pol in pols:
             x = np.mean(list(por_texto(linhas, pol, "atencao_perdida").values())) * 100
@@ -115,14 +118,16 @@ def grafico_proxy_x_real(modos: dict, t: dict, saida: Path, fonte: str):
             ax.text(xr, yr, NOMES.get(pol, pol), fontsize=9.5, va="center", color=cor,
                     fontweight="bold" if pol == "dqn" else "normal")
         ax.set_xlim(x0, x1 + 0.22 * (x1 - x0))  # espaço para os rótulos
-        rho = resumo.get("correlacao_proxy", {}).get("kl", {}).get("spearman_dentro_do_texto", float("nan"))
-        rho_txt = num(rho, 2) if np.isfinite(rho) else "—"
+        corr = resumo.get("correlacao_proxy", {}).get("kl", {})
+        rho = corr.get("spearman_dentro_do_texto", float("nan")) if "politicas" in corr else float("nan")
+        rho_txt = num(rho, 2) if np.isfinite(rho) else "— (rode avaliar_no_modelo.py)"
         ax.set_title(f"{NOMES_MODOS[modo]}\nSpearman dentro do texto: {rho_txt}", color=t["texto"],
                      fontsize=11.5, loc="left", pad=10)
         ax.set_xlabel("atenção perdida, proxy (%)", color=t["secundario"], fontsize=11)
     eixos[0][0].set_ylabel("KL do modelo completo, real (nats/token)", color=t["secundario"], fontsize=11)
-    fig.text(0.06, 0.95, f"Cada ponto cinza é um texto de teste {FONTES.get(fonte, fonte)} sob uma regra fixa; "
-             "os rotulados são médias por política", color=t["secundario"], fontsize=10.5)
+    fig.text(0.02, 0.95, f"Cada ponto cinza é um texto de teste {FONTES.get(fonte, fonte)} sob uma política competitiva; "
+             "os rotulados são médias · aleatória e janela deslizante ficam fora da escala",
+             color=t["secundario"], fontsize=10.5)
     fig.subplots_adjust(left=0.07, right=0.98, top=0.78, bottom=0.14, wspace=0.22)
     fig.savefig(saida, facecolor=t["fundo"])
     plt.close(fig)

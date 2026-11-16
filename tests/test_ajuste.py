@@ -77,3 +77,15 @@ def test_grade_do_h2o_cobre_todo_o_orcamento(traces):
     """O ótimo não pode ficar fora da grade: de 0 recentes protegidos até o orçamento inteiro."""
     env = KVCacheEnv(traces, orcamento=8)
     assert grade_de("h2o", env) == {"n_recentes": list(range(9))}
+
+
+def test_tova_despeja_quem_teve_menos_atencao_recente(traces):
+    from kvcache_rl.baselines import tova
+
+    env = KVCacheEnv(traces, orcamento=8, modo="por_cabeca")
+    _, info = env.reset(options={"trace": 0, "unidade": 3})
+    fim = False
+    while not fim:
+        a = tova(env, None, info)
+        assert info["atencao_recente"][a] == info["atencao_recente"].min()
+        _, _, fim, _, info = env.step(a)

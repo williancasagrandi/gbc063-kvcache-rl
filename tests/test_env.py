@@ -126,12 +126,10 @@ def test_decidir_mais_fino_perde_menos(traces):
     assert perda["por_cabeca"] < perda["por_camada"] < perda["geral"]
 
 
-@pytest.mark.parametrize("modo", MODOS)
-def test_oraculo_do_proxy_vence_as_regras_simples_no_proxy(traces, modo):
+@pytest.mark.parametrize("modo", ["geral", "por_camada", "por_cabeca"])
+def test_h2o_vence_a_aleatoria(traces, modo):
     env = KVCacheEnv(traces, orcamento=8, modo=modo)
-    perdas = {n: avaliar(env, BASELINES[n])["atencao_perdida"] for n in ("oraculo", "janela_deslizante", "aleatoria")}
-    assert perdas["oraculo"] <= perdas["janela_deslizante"]
-    assert perdas["oraculo"] <= perdas["aleatoria"]
+    assert avaliar(env, BASELINES["h2o"])["atencao_perdida"] < avaliar(env, BASELINES["aleatoria"])["atencao_perdida"]
 
 
 def test_recompensa_padrao_e_so_atencao_perdida(traces):
@@ -146,13 +144,6 @@ def test_recompensa_padrao_e_so_atencao_perdida(traces):
     assert G == pytest.approx(-env.perda_total)
 
 
-def test_oraculo_so_protege_a_agulha_com_bonus(traces):
-    com = KVCacheEnv(traces, orcamento=8, modo="geral", bonus_agulha=10.0)
-    assert avaliar(com, BASELINES["oraculo"])["agulha"] == pytest.approx(1.0)
-    sem = KVCacheEnv(traces, orcamento=8, modo="geral")
-    assert avaliar(sem, BASELINES["oraculo"])["atencao_perdida"] <= avaliar(com, BASELINES["oraculo"])["atencao_perdida"]
-
-
 def test_unidades_no_formato_do_qwen():
     """O ambiente não assume 12 x 12: com GQA (Qwen2.5-0.5B) são 24 camadas x 2 cabeças de K/V."""
     rng = np.random.default_rng(0)
@@ -162,3 +153,29 @@ def test_unidades_no_formato_do_qwen():
     env = KVCacheEnv(tr, orcamento=8, modo="por_cabeca")
     assert env.U == 48 and env.forma == (24, 2)
     assert env.nome_unidade(3) == "camada 1, cabeça de K/V 1"
+
+
+@pytest.mark.parametrize("modo", ["geral", "por_cabeca"])
+def test_credito_por_despejo_tem_o_mesmo_total(traces, modo):
+    """Cobrar cada despejo pelo que ele custará até o fim dá exatamente a mesma soma que cobrar,
+    bloco a bloco, a atenção dada a todos os despejados: muda só quando o custo é cobrado."""
+    totais = {}
+    for credito in ("por_despejo", "por_passo"):
+        env = KVCacheEnv(traces, orcamento=8, modo=modo, credito=credito)
+        env.reset(options={"trace": 1, "unidade": env.U - 1})
+        rng, G, fim = np.random.default_rng(5), 0.0, False
+        while not fim:
+            _, r, fim, _, _ = env.step(int(rng.integers(env.n_cand)))
+            G += r
+        totais[credito] = G
+        assert -env.perda_total == pytest.approx(G) or credito == "por_despejo"
+    assert totais["por_despejo"] == pytest.approx(totais["por_passo"])
+
+
+def test_credito_por_despejo_cobra_o_futuro_do_bloco_despejado(traces):
+    env = KVCacheEnv(traces, orcamento=8, credito="por_despejo")
+    _, info = env.reset(options={"trace": 0})
+    k, bloco = env.k, info["candidatos"][3]
+    _, r, _, _, info = env.step(3)
+    assert info["bloco_despejado"] == bloco
+    assert r == pytest.approx(-env.A[k + 1:, bloco].sum())

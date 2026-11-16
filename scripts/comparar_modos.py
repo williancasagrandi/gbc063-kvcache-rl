@@ -4,7 +4,7 @@ As métricas no LLM real (perplexidade e senha) ficam em scripts/graficos_modelo
 
     python scripts/comparar_modos.py --fonte gpt2
 
-Para cada modo mostra o H2O (melhor regra fixa), o DQN e o oráculo, em
+Para cada modo mostra o H2O, o TOVA e o DQN, em
 atenção perdida e agulha mantida. Usa os resultados já salvos por
 avaliar_baselines.py e treinar_dqn.py; modos sem resultado são pulados.
 
@@ -33,7 +33,7 @@ def coletar(fonte: str) -> list[dict]:
         linha = {"modo": modo}
         for chave in ("retorno", "atencao_perdida", "agulha"):
             linha[f"h2o_{chave}"] = baselines["h2o"][chave]
-            linha[f"oraculo_{chave}"] = baselines["oraculo"][chave]
+            linha[f"tova_{chave}"] = baselines["tova"][chave] if "tova" in baselines else float("nan")
             m, lo, hi = resumo_dqn(finais, chave)
             linha[f"dqn_{chave}"], linha[f"dqn_{chave}_min"], linha[f"dqn_{chave}_max"] = m, lo, hi
         linha["sementes"] = len(finais)
@@ -49,7 +49,7 @@ def grafico(linhas: list[dict], t: dict, saida: Path, fonte: str):
             l[f"dqn_{chave}_lo"], l[f"dqn_{chave}_hi"] = l[f"dqn_{chave}_min"], l[f"dqn_{chave}_max"]
     grafico_modos(
         plt, linhas,
-        series=[("h2o", "H2O (melhor regra fixa)"), ("dqn", "DQN"), ("oraculo", "Oráculo do proxy (vê o futuro)")],
+        series=[("h2o", "H2O"), ("tova", "TOVA"), ("dqn", "DQN")],
         paineis=[("atencao_perdida", "Atenção perdida por token (%) — menor é melhor", 1, 100),
                  ("agulha", "Agulha no cache, proxy (%) — maior é melhor", 0, 100)],
         t=t, saida=saida,
@@ -67,7 +67,7 @@ def main():
     linhas = coletar(a.fonte)
     print(f"{'modo':<32} {'':>8} {'retorno':>9} {'atenção perdida':>16} {'agulha':>8}")
     for l in linhas:
-        for pol in ("h2o", "dqn", "oraculo"):
+        for pol in ("h2o", "tova", "dqn"):
             print(f"{NOMES_MODOS[l['modo']] if pol == 'h2o' else '':<32} {pol:>8} {l[f'{pol}_retorno']:>9.2f} "
                   f"{l[f'{pol}_atencao_perdida']:>16.3f} {l[f'{pol}_agulha']:>8.2f}")
 
